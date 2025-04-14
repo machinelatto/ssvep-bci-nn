@@ -172,3 +172,20 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Large dataset files
+*.mat
+*.npy
+
+# Results
+*.jpeg
+*.jpg
+*.png
+*csv
+*.pkl
+
+# Models
+*.pth
+
+# VSCODE config
+settings.json
