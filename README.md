@@ -1,2 +1,2 @@
 # ssvep-bci-nn
-Neura Networks for SSVEP BCIs
+Neural Networks for SSVEP BCIs
