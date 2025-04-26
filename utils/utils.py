@@ -7,88 +7,6 @@ from torch.utils.data import DataLoader, TensorDataset
 import seaborn as sns
 
 
-def train(
-    model,
-    train_loader,
-    val_loader,
-    criterion,
-    optimizer,
-    num_epochs=100,
-    device=0,
-    save_path="best_model_raw.pth",
-):
-    best_val_accuracy = 0.0
-    model.to(device)
-    early_stop_count = 0
-    current_min_val_loss = float("inf")
-    for epoch in range(num_epochs):
-        # Training Phase
-        model.train()
-        running_loss = 0.0
-        train_correct = 0
-        train_total = 0
-
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
-
-            # eval train
-            _, preds = torch.max(outputs, 1)
-            train_correct += (preds == labels).sum().item()
-            train_total += labels.size(0)
-
-        train_accuracy = train_correct / train_total
-        avg_train_loss = running_loss / len(train_loader)
-
-        # eval validation
-        model.eval()
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-        with torch.no_grad():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                val_loss += loss.item()
-
-                # val accuracy
-                _, preds = torch.max(outputs, 1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
-
-        val_accuracy = val_correct / val_total
-        avg_val_loss = val_loss / len(val_loader)
-
-        # Save if best vall acc
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
-            torch.save(model.state_dict(), save_path)
-            print(f"Best model saved with accuracy: {best_val_accuracy:.4f}")
-
-        print(
-            f"Epoch {epoch + 1}/{num_epochs}: "
-            f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
-            f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
-        )
-        if (avg_val_loss + 0.01) <= current_min_val_loss:
-            current_min_val_loss = avg_val_loss
-            early_stop_count = 0
-            print("Validation loss decreased...")
-        else:
-            early_stop_count += 1
-            if early_stop_count >= 15:
-                print(
-                    "Validation loss has not decreased for 10 epochs. Stoping training..."
-                )
-                break
-
-
 def split_train_test_trials(X, y, test_trial):
     y_test = []
     y_train = []
@@ -221,7 +139,7 @@ def get_desired_freqs_and_classes(
     signals = np.array(signals)
     labels = np.array(labels)
     print(signals.shape)
-    print(labels)
+    print(labels.shape)
     return signals, labels
 
 
@@ -272,7 +190,6 @@ def plot_reordered_confusion_matrix(all_labels, all_preds, class_labels, filenam
 
     # Create a figure and increase the figure size
     plt.figure(figsize=(20, 16))
-    print("clled")
     # Create a heatmap using seaborn
     sns.heatmap(
         cm_normalized,
@@ -302,14 +219,17 @@ def plot_reordered_confusion_matrix(all_labels, all_preds, class_labels, filenam
     # plt.show()
 
 
-def evaluate(model, test_loader, class_labels, device=0, filename=None):
+def evaluate(
+    model, test_loader, class_labels, device=0, filename=None, one_channel=True
+):
     model.eval()
     all_preds, all_labels = [], []
 
     with torch.no_grad():
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            inputs = inputs.unsqueeze(1)  # ADD THIS LINE
+            if one_channel:
+                inputs = inputs.unsqueeze(1)
 
             outputs = model(inputs)
 
