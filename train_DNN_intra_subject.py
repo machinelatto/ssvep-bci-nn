@@ -1,15 +1,15 @@
+from models.DNN import SSVEPDNN
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import scipy
 import pickle
 from tqdm import tqdm
 
-from utils.utils import evaluate, prepare_data_subjects
+from utils.utils import evaluate, prepare_data_trials
 from pathlib import Path
 import pandas as pd
-from models.CompactCNN import CompactCNN
 
 torch.cuda.is_available()
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -40,7 +40,6 @@ def train(
         for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-            inputs = inputs.unsqueeze(1)
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
@@ -63,7 +62,6 @@ def train(
         with torch.no_grad():
             for inputs, labels in val_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
-                inputs = inputs.unsqueeze(1)
 
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
@@ -88,44 +86,35 @@ def train(
             f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
             f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
         )
-        if (avg_val_loss + 0.01) <= current_min_val_loss:
+        if (avg_val_loss + 0.0001) <= current_min_val_loss:
             current_min_val_loss = avg_val_loss
             early_stop_count = 0
             print("Validation loss decreased...")
         else:
             early_stop_count += 1
-            if early_stop_count >= 50:
+            if early_stop_count >= 1000:
                 print(
-                    "Validation loss has not decreased for 50 epochs. Stoping training..."
+                    "Validation loss has not decreased for 1000 epochs. Stoping training..."
                 )
                 break
 
 
-def run_and_evaluate_cross_subject(
-    subject, signals, labels, batch_size, epochs, freqs_labels, validation=True
+def run_and_evaluate_subject(
+    subject, signals, labels, batch_size, epochs, freqs_labels
 ):
     test_subject = subject
-    if validation:
-        train_loader, test_loader, validation_loader = prepare_data_subjects(
-            signals,
-            labels,
-            test_subject=test_subject,
-            train_batch_size=batch_size,
-            validation_split=True,
-        )
-    else:
-        train_loader, test_loader = prepare_data_subjects(
-            signals,
-            labels,
-            test_subject=test_subject,
-            train_batch_size=batch_size,
-            validation_split=False,
-        )
-        validation_loader = test_loader
+
+    train_loader, test_loader = prepare_data_trials(
+        signals,
+        labels,
+        test_trial=5,
+        train_batch_size=batch_size,
+    )
+    validation_loader = test_loader
     n_classes = len(freqs_labels)
-    model = CompactCNN(n_classes, 9, 250, 0.5, 250).to(device)
+    model = SSVEPDNN(n_classes, 9, 250, 3).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), weight_decay=0.001, lr=0.0001)
 
     # Train the model
     best_model_save_path = RESULTS_DIR.joinpath(f"{test_subject + 1}_best_model.pth")
@@ -141,12 +130,16 @@ def run_and_evaluate_cross_subject(
     )
 
     # Eval
-    best_model = CompactCNN(n_classes, 9, 250, 0.5, 250)
+    best_model = SSVEPDNN(n_classes, 9, 250, 3)
     best_model.load_state_dict(torch.load(best_model_save_path))
     best_model.to(device)
     cm_path = RESULTS_DIR.joinpath(f"{test_subject + 1}_cm.png")
     acc, rcll, f1s = evaluate(
-        best_model, test_loader, class_labels=freqs_labels, filename=cm_path
+        best_model,
+        test_loader,
+        class_labels=freqs_labels,
+        filename=cm_path,
+        one_channel=False,
     )
     metrics = {
         "accuracy": np.array(acc),
@@ -164,14 +157,14 @@ def run_model_for_all_subjects(
     processed_signals = np.load(data_path)
     labels = np.load(labels_path)
 
-    for subject in range(processed_signals.shape[0])[:10]:
+    for subject in range(processed_signals.shape[0]):
         print(f"Running for subject {subject+1} ---------------")
         print(processed_signals[subject].shape)
         print(labels[subject])
-        results[subject] = run_and_evaluate_cross_subject(
+        results[subject] = run_and_evaluate_subject(
             subject,
-            processed_signals,
-            labels,
+            processed_signals[subject],
+            labels[subject],
             batch_size,
             epochs,
             classes,
@@ -180,21 +173,18 @@ def run_model_for_all_subjects(
 
 
 if __name__ == "__main__":
-    # dataset_path = Path(DATASET_DIR)
-    # freq_phase = scipy.io.loadmat(DATASET_DIR.joinpath("Freq_Phase.mat"))
-    # freqs = np.round(freq_phase["freqs"], 2)
-    # selected_freqs = freqs[0]  # Frequências de interesse
-
-    RESULTS_DIR = Path("CompactCNN_npy/40freq_new")
+    RESULTS_DIR = Path("DNN_intra/40freq/test_trial_5")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    DATASET = Path("processed_40_classes.npy")
-    LABELS = Path("labels_40_classes.npy")
+    # DATASET = Path("../processed_datasets/sinais_filtrados_6_70_Hz_janelas_1s/")
+    DATASET = Path("pre_processed_3_subbands_40_classesTrue.npy")
+    LABELS = Path("labels_40_classesTrue.npy")
 
     selected_freqs = np.array(
         [np.round(i, 2) for i in np.linspace(8, 15.8, 40)]
     )  # Frequências de interesse
-    # selected_freqs = np.array([8.0, 10.0, 12.0, 15.0])
+    # selected_freqs = np.array([i for i in range(8, 16)])
+    # selected_freqs = np.array([8.2, 10.8, 12.6, 15.4])
     channels = [
         47,
         53,
@@ -207,9 +197,10 @@ if __name__ == "__main__":
         62,
     ]  # Pz, PO5, PO3, POz, PO4, PO6, O1, Oz, O2
 
-    epochs = 5
+    epochs = 1000
+
     results_dict = run_model_for_all_subjects(
-        DATASET, LABELS, 128, channels, selected_freqs, epochs
+        DATASET, LABELS, 100, channels, selected_freqs, epochs
     )
     with open(RESULTS_DIR.joinpath("results_dict.pkl"), "wb") as f:
         pickle.dump(results_dict, f)

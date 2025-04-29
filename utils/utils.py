@@ -37,6 +37,8 @@ def prepare_data_trials(
     )
     train_loader = DataLoader(train_data, batch_size=train_batch_size, shuffle=True)
     test_loader = DataLoader(test_data, batch_size=test_batch_size, shuffle=True)
+    print(f"Training dataset size: {len(y_train)}")
+    print(f"Test dataset size: {len(y_test)}")
     return train_loader, test_loader
 
 
@@ -206,7 +208,7 @@ def plot_reordered_confusion_matrix(all_labels, all_preds, class_labels, filenam
     # Set labels and title
     plt.xlabel("Predicted", fontweight="bold")
     plt.ylabel("True", fontweight="bold")
-    plt.title("Normalized Confusion Matrix (Sorted)", fontsize=16, fontweight="bold")
+    plt.title("Normalized Confusion Matrix", fontsize=16, fontweight="bold")
 
     # Rotate x-axis labels for better readability
     plt.xticks(rotation=90)

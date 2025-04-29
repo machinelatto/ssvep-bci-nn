@@ -1,7 +1,8 @@
 import numpy as np
 import scipy
 from scipy.signal import cheby1, filtfilt
-from utils.utils import get_desired_freqs_and_classes
+from utils import get_desired_freqs_and_classes
+from pathlib import Path
 
 
 def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
@@ -45,7 +46,9 @@ def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
     return AllData
 
 
-def pre_process_dataset(dataset_path, channels, classes, sampling_rate, subban_no=0):
+def pre_process_dataset(
+    dataset_path, channels, classes, sampling_rate, subban_no=0, split_trials=False
+):
     subjects_files = [file for file in dataset_path.glob("*.npy")]
     freq_phase = scipy.io.loadmat(dataset_path.joinpath("Freq_Phase.mat"))
     freqs = np.round(freq_phase["freqs"], 2)
@@ -78,16 +81,55 @@ def pre_process_dataset(dataset_path, channels, classes, sampling_rate, subban_n
     labels = np.array(labels)
     print(signals.shape)
     print(labels.shape)
+    labels = labels.reshape([35, *subj_labels.shape]) if split_trials else labels
+
     if subban_no >= 2:
-        print(f"Dividing signal into {subban_no} sub-bands.")
+        print(f"Dividing signals into {subban_no} sub-bands.")
         processed = filter_signals_subbands(signals, subban_no, sampling_rate)
+        processed = (
+            processed.reshape(
+                [35, trials, samples_per_trial, subban_no, n_channels, n_points]
+            )
+            if split_trials
+            else processed
+        )
         np.save(
-            f"pre_processed_{subban_no}_subbands_{len(classes)}_classes.npy",
+            f"pre_processed_{subban_no}_subbands_{len(classes)}_classes{split_trials}.npy",
             processed,
         )
-        np.save(f"labels_{len(classes)}_classes.npy", labels)
+        np.save(f"labels_{len(classes)}_classes{split_trials}.npy", labels)
         return processed, labels
     else:
-        np.save(f"processed_{len(classes)}_classes.npy", signals)
-        np.save(f"labels_processed_{len(classes)}_classes.npy", labels)
+        signals = (
+            signals.reshape([35, *subj_signals.shape]) if split_trials else signals
+        )
+        np.save(f"processed_{len(classes)}_classes{split_trials}.npy", signals)
+        np.save(f"labels_processed_{len(classes)}_classes{split_trials}.npy", labels)
         return signals, labels
+
+
+if __name__ == "__main__":
+    DATASET = Path("../../processed_datasets/sinais_filtrados_6_70_Hz_janelas_1s/")
+
+    selected_freqs = np.array(
+        [np.round(i, 2) for i in np.linspace(8, 15.8, 40)]
+    )  # Frequências de interesse
+    # selected_freqs = np.array([i for i in range(8, 16)])
+    # selected_freqs = np.array([8.2, 10.8, 12.6, 15.4])
+    channels = [
+        47,
+        53,
+        54,
+        55,
+        56,
+        57,
+        60,
+        61,
+        62,
+    ]  # Pz, PO5, PO3, POz, PO4, PO6, O1, Oz, O2
+
+    s, l = pre_process_dataset(
+        DATASET, channels, selected_freqs, 250, 3, split_trials=True
+    )
+    print(s.shape)
+    print(l.shape)
