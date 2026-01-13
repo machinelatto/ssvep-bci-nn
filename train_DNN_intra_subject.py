@@ -173,17 +173,17 @@ def run_model_for_all_subjects(
 
 
 if __name__ == "__main__":
-    RESULTS_DIR = Path("DNN_intra/40freq/test_trial_5")
+    RESULTS_DIR = Path("DNN_intra/8freq/test_trial_5")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # DATASET = Path("../processed_datasets/sinais_filtrados_6_70_Hz_janelas_1s/")
-    DATASET = Path("pre_processed_3_subbands_40_classesTrue.npy")
-    LABELS = Path("labels_40_classesTrue.npy")
+    DATASET = Path("pre_processed_3_subbands_8_classesTrue.npy")
+    LABELS = Path("labels_8_classesTrue.npy")
 
-    selected_freqs = np.array(
-        [np.round(i, 2) for i in np.linspace(8, 15.8, 40)]
-    )  # Frequências de interesse
-    # selected_freqs = np.array([i for i in range(8, 16)])
+    # selected_freqs = np.array(
+    #     [np.round(i, 2) for i in np.linspace(8, 15.8, 40)]
+    # )  # Frequências de interesse
+    selected_freqs = np.array([i for i in range(8, 16)])
     # selected_freqs = np.array([8.2, 10.8, 12.6, 15.4])
     channels = [
         47,

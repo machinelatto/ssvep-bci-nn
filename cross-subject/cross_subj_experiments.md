@@ -29,14 +29,15 @@ We could increase the number of signals with windowing, but we choose to do not 
 
 #### Experiments
 
-Frequencies: 8 and 40
-Users: 10 and 35
+Frequencies: 8
+Users: 10
 Signal duration: 0.4, 0.6, 0.8, 1s
 
-- [ ] 8 frequencies, 10 users
+- [x] 8 frequencies, 10 users
     - [x] CCA
     - [x] EEGNET
     - [x] DNN
     - [x] CCA+EEGNET
-    - [x] CCA+DNN
+    - [x] FBCCA+DNN
+    - [x] custom
 

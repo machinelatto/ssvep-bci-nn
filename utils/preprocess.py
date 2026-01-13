@@ -129,7 +129,7 @@ if __name__ == "__main__":
     ]  # Pz, PO5, PO3, POz, PO4, PO6, O1, Oz, O2
 
     s, l = pre_process_dataset(
-        DATASET, channels, selected_freqs, 250, 3, split_trials=True
+        DATASET, channels, selected_freqs, 250, 1, split_trials=True
     )
     print(s.shape)
     print(l.shape)
