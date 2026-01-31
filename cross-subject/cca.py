@@ -97,7 +97,7 @@ def matriz_referencia(
     else:
         theta = fase
 
-    print(f"theta: {theta}")
+    # print(f"theta: {theta}")
     # Gerando sinais senoidais e cossenoidais
     for k in range(1, numero_de_harmonicas + 1):
         y1 = np.sin(2 * np.pi * k * frequencia * t + theta)
@@ -108,8 +108,8 @@ def matriz_referencia(
     y = np.array(y)
     y = np.transpose(y)
     # Repete o array para coincidir com o número de sessões
-    print(f"y shape: {y.shape}")
+    # print(f"y shape: {y.shape}")
     Y = np.tile(y, (sessoes, 1))
-    print(f"Y shape: {Y.shape}")
+    # print(f"Y shape: {Y.shape}")
     # Retorna a Matriz de sinais de referência
     return Y

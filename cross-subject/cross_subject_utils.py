@@ -10,7 +10,7 @@ from sklearn.metrics import (
 )
 import torch
 from tqdm import tqdm
-import tqdm.notebook
+# import tqdm.notebook
 
 
 def plot_learning_curves(train_losses, val_losses, train_accuracies, val_accuracies):
@@ -133,14 +133,14 @@ def evaluate(model, test_loader):
     recall = recall_score(all_labels, all_preds, average="weighted")
     f1 = f1_score(all_labels, all_preds, average="weighted")
     cm = confusion_matrix(all_labels, all_preds)
-    print(f"Test set Accuracy: {accuracy:.4f}")
-    print(f"Recall: {recall:.4f}")
-    print(f"F1 Score: {f1:.4f}")
-    classes = np.unique(np.concatenate((all_labels, all_preds)))
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
-    fig, ax = plt.subplots(figsize=(15, 15))
-    disp.plot(ax=ax, cmap="Blues", xticks_rotation="vertical")
-    plt.show()
+    # print(f"Test set Accuracy: {accuracy:.4f}")
+    # print(f"Recall: {recall:.4f}")
+    # print(f"F1 Score: {f1:.4f}")
+    # classes = np.unique(np.concatenate((all_labels, all_preds)))
+    # disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+    # fig, ax = plt.subplots(figsize=(15, 15))
+    # disp.plot(ax=ax, cmap="Blues", xticks_rotation="vertical")
+    # plt.show()
     return accuracy, recall, f1, cm
 
 
@@ -201,7 +201,7 @@ def load_data_from_users(
     filter_order=10,
 ):
     all_data = []
-    for user in tqdm.notebook.tqdm(users, desc="Carregando dados dos usuários"):
+    for user in tqdm(users, desc="Carregando dados dos usuários"):
         file_path = f"{dataset_path}/S{user}.mat"
         data = scipy.io.loadmat(file_path)["data"]
         if filter_bandpass:
