@@ -1,6 +1,6 @@
 """
-Run EEGNet+CCA cross-subject experiments with all time windows.
-Uses CCA optimization and projections similar to the notebook approach.
+Run DNN+CCA cross-subject experiments with all time windows.
+Uses CCA optimization per subband and subband-specific filtering.
 """
 
 import numpy as np
@@ -13,14 +13,62 @@ from pathlib import Path
 from tqdm import tqdm
 import copy
 import scipy.io
-from braindecode.models import EEGNet
+import torch.nn.functional as F
 
 from cross_subject_utils import (
     evaluate,
     get_windows,
     load_data_from_users,
+    filter_signals_subbands,
 )
 from cca import CCA_otimizacao, matriz_referencia
+
+
+class SSVEPDNN(nn.Module):
+    """SSVEP Deep Neural Network with subband processing."""
+    def __init__(self, num_classes=40, channels=9, samples=250, subbands=3):
+        super(SSVEPDNN, self).__init__()
+        # [batch, subbands, channels, time]
+        # Subband combination layer
+        self.subband_combination = nn.Conv2d(
+            subbands, 1, kernel_size=(1, 1), bias=False
+        )
+        # Channel combination layer
+        self.channel_combination = nn.Conv2d(1, 120, kernel_size=(channels, 1))
+        # First dropout
+        self.drop1 = nn.Dropout(0.1)
+        # Third layer - Time convolution
+        self.third_conv = nn.Conv2d(120, 120, kernel_size=(1, 2), stride=(1, 2))
+        # Second dropout
+        self.drop2 = nn.Dropout(0.1)
+        self.relu = nn.ReLU()
+        # 4th conv - FIR filtering
+        self.fourth_conv = nn.Conv2d(120, 120, kernel_size=(1, 10), padding="same")
+        self.drop3 = nn.Dropout(0.95)
+
+        # Fully connected layer - Classifier
+        self.fc = nn.Linear(120 * (samples // 2), num_classes)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        with torch.no_grad():
+            self.subband_combination.weight.fill_(1.0)
+
+    def forward(self, x):
+        # x shape: [batch, subbands, channels, time]
+        x = self.subband_combination(x)  # [batch, 1, channels, time]
+        x = self.channel_combination(x)  # [batch, 120, 1, time]
+        x = self.drop1(x)
+        x = self.third_conv(x)  # [batch, 120, 1, time/2]
+        x = self.drop2(x)
+        x = self.relu(x)
+        x = self.fourth_conv(x)  # [batch, 120, 1, time/2]
+        x = self.drop3(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.fc(x)  # [batch, num_classes]
+        output = F.softmax(x, dim=1)
+        return output
 
 
 def train(
@@ -123,9 +171,6 @@ fases = freq_phase["phases"]
 
 # Preprocessing parameters
 sample_rate = 250
-filter_order = 10
-freq_cut_high = 70
-freq_cut_low = 6
 delay = 160
 
 # CCA parameters
@@ -134,7 +179,7 @@ inform_fase = 0
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 11))  # 35 users for cross-subject
+users = list(range(1, 11))  # 10 users for cross-subject
 frequencias_desejadas = frequencias[:8]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
@@ -148,11 +193,8 @@ all_data = load_data_from_users(
     dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     users=users,
     visual_delay=delay,
-    filter_bandpass=True,
+    filter_bandpass=False,
     sample_rate=sample_rate,
-    freq_cut_low=freq_cut_low,
-    freq_cut_high=freq_cut_high,
-    filter_order=filter_order,
 )
 
 # Time window sizes in seconds
@@ -169,16 +211,14 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"CCA_eegnet_8_10/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"CCA_dnn_8_10/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     metricas_usuarios = []
+
     # Leave-one-user-out cross-validation
     for test_user_idx, test_user in enumerate(users):
-        if test_user <= 3 and tamanho_da_janela_seg == 1.0:
-            continue
-
         print(f"\nProcessing User {test_user}")
         train_users = [u for u in users if u != test_user]
         print(f"Train Users: {train_users}")
@@ -219,41 +259,61 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             )
             Y_test[:, :, k] = y_test
 
+        # Extract EEG data for each frequency (before subband filtering)
         X_train = np.zeros(
-            (tamanho_da_janela * num_trials_train, len(occipital_electrodes), len(indices))
+            (
+                tamanho_da_janela * num_trials_train,
+                3,
+                len(occipital_electrodes),
+                len(indices),
+            )
         )
         X_test = np.zeros(
-            (tamanho_da_janela * num_trials_test, len(occipital_electrodes), len(indices))
+            (
+                tamanho_da_janela * num_trials_test,
+                3,
+                len(occipital_electrodes),
+                len(indices),
+            )
         )
 
         for k in range(len(indices)):
-            # Extract training data for this frequency
+            # For training: each trial is a single window
             eeg_matrix_train = train_data[
                 occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ]
+            ].reshape(-1, len(occipital_electrodes), tamanho_da_janela)
+            eeg_matrix_train = filter_signals_subbands(
+                eeg_matrix_train, subban_no=3, sampling_rate=250
+            )
             eeg_matrix_test = test_data[
                 occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ]
-            # Transpose so each row represents a sample
-            eeg_matrix_train = np.transpose(eeg_matrix_train)
-            eeg_matrix_test = np.transpose(eeg_matrix_test)
+            ].reshape(-1, len(occipital_electrodes), tamanho_da_janela)
+            eeg_matrix_test = filter_signals_subbands(
+                eeg_matrix_test, subban_no=3, sampling_rate=250
+            )
+
+            eeg_matrix_train = np.moveaxis(eeg_matrix_train, -1, 0)
+            eeg_matrix_test = np.moveaxis(eeg_matrix_test, -1, 0)
             eeg_matrix_train = np.concatenate(eeg_matrix_train, axis=0)
             eeg_matrix_test = np.concatenate(eeg_matrix_test, axis=0)
 
-            X_train[:, :, k] = eeg_matrix_train
-            X_test[:, :, k] = eeg_matrix_test
+            X_train[:, :, :, k] = eeg_matrix_train
+            X_test[:, :, :, k] = eeg_matrix_test
 
-        # CCA optimization (across all training data)
+        # CCA optimization (across all training data, per subband)
         Combinadores_Y = []
         Combinadores_X = []
-        correlacoes_max = []
-        for k in range(len(indices)):
-            Wx, Wy, corr = CCA_otimizacao(X_train[:, :, k], Y_train[:, :, k])
-            Combinadores_Y.append(Wy)
-            Combinadores_X.append(Wx)
-            correlacoes_max.append(corr)
-        Combinadores_X = np.column_stack(Combinadores_X)
-        Combinadores_Y = np.column_stack(Combinadores_Y)
+        for i in range(1):
+            Combinadores_Y_sub = []
+            Combinadores_X_sub = []
+            for k in range(len(indices)):
+                Wx, Wy, _ = CCA_otimizacao(X_train[:, i, :, k], Y_train[:, :, k])
+                Combinadores_Y_sub.append(Wy)
+                Combinadores_X_sub.append(Wx)
+            Combinadores_X.append(np.column_stack(Combinadores_X_sub))
+            Combinadores_Y.append(np.column_stack(Combinadores_Y_sub))
+        Combinadores_X = np.array(Combinadores_X)  # shape: (3, len(indices), channels)
+        Combinadores_Y = np.array(Combinadores_Y)  # shape: (3, len(indices), 2*num_harmonica)
 
         # Split into windows
         X_teste_janelas = []
@@ -263,12 +323,12 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         for k in range(len(indices)):
             X_t, numero_janelas_teste = get_windows(
-                X_test[:, :, k], tamanho_da_janela, include_last=False
+                X_test[:, :, :, k], tamanho_da_janela, include_last=False
             )
             Y_t, _ = get_windows(Y_test[:, :, k], tamanho_da_janela, include_last=False)
 
             X_v, numero_janelas_treino = get_windows(
-                X_train[:, :, k], tamanho_da_janela, include_last=False
+                X_train[:, :, :, k], tamanho_da_janela, include_last=False
             )
             Y_v, _ = get_windows(Y_train[:, :, k], tamanho_da_janela, include_last=False)
 
@@ -281,41 +341,44 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         # Build training tensor with CCA projections
         rotulos_treinamento = []
         tensor_treinamento = np.zeros(
-            [len(indices) * numero_janelas_treino, len(indices), tamanho_da_janela]
+            [len(indices) * numero_janelas_treino, 3, len(indices), tamanho_da_janela]
         )
         cont = 0
 
         for m in range(len(indices)):
             for j in range(numero_janelas_treino):
-                janela_x = X_treino_janelas[m][j]
                 rotulos_treinamento.append(frequencias[indices[m]])
                 cont_1 = 0
                 for w in range(len(indices)):
-                    Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x.T)
-                    tensor_treinamento[cont, cont_1, :] = projecao_x
+                    for subband in range(3):
+                        Wx = Combinadores_X[subband, :, w]
+                        janela_x = X_treino_janelas[m][j][:, subband, :]
+                        janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
+                        projecao_x = np.dot(Wx, janela_x.T)
+                        tensor_treinamento[cont, subband, cont_1, :] = projecao_x
+
                     cont_1 += 1
                 cont += 1
 
         # Build test tensor with CCA projections
         rotulos_teste = []
         tensor_teste = np.zeros(
-            [len(indices) * numero_janelas_teste, len(indices), tamanho_da_janela]
+            [len(indices) * numero_janelas_teste, 3, len(indices), tamanho_da_janela]
         )
         cont = 0
 
         for m in range(len(indices)):
             for j in range(numero_janelas_teste):
-                janela_x = X_teste_janelas[m][j]
                 rotulos_teste.append(frequencias[indices[m]])
                 cont_1 = 0
-
                 for w in range(len(indices)):
-                    Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x.T)
-                    tensor_teste[cont, cont_1, :] = projecao_x
+                    for subband in range(3):
+                        Wx = Combinadores_X[subband, :, w]
+                        janela_x = X_teste_janelas[m][j][:, subband, :]
+                        janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
+                        projecao_x = np.dot(Wx, janela_x.T)
+                        tensor_teste[cont, subband, cont_1, :] = projecao_x
+
                     cont_1 += 1
                 cont += 1
 
@@ -345,13 +408,12 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         print(f"Y_test: {Y_teste.shape}")
 
         # Model setup
-        model = EEGNet(
-            n_chans=len(indices),  # Number of CCA components (same as number of frequencies)
-            n_outputs=len(frequencias_desejadas),
-            n_times=tamanho_da_janela,
-            kernel_length=(tamanho_da_janela // 2) if tamanho_da_janela > 2 else 1,
+        model = SSVEPDNN(
+            num_classes=len(frequencias_desejadas),
+            channels=len(indices),
+            samples=tamanho_da_janela,
+            subbands=3,
         )
-
         model = model.to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=0.0001)
