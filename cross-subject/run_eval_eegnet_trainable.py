@@ -1,6 +1,6 @@
 """
-Run EEGNet+CCA cross-subject experiments (no CCA training) with all time windows.
-CCA is applied per-trial without training on aggregated data.
+Run EEGNet+CCA cross-subject experiments with all time windows.
+Uses CCA optimization and projections similar to the notebook approach.
 """
 
 import numpy as np
@@ -16,94 +16,11 @@ import scipy.io
 from braindecode.models import EEGNet
 
 from cross_subject_utils import (
-    plot_learning_curves,
     evaluate,
+    get_windows,
     load_data_from_users,
 )
 from cca import CCA, reference_matrix
-
-
-def train(
-    model,
-    train_loader,
-    val_loader,
-    criterion,
-    optimizer,
-    num_epochs=100,
-    device=0,
-    save_path="best_model.pth",
-):
-    """Train the model with early stopping based on validation accuracy."""
-    best_val_accuracy = -float("inf")
-    model.to(device)
-    train_losses, val_losses = [], []
-    train_accuracies, val_accuracies = [], []
-    
-    for epoch in tqdm(range(num_epochs)):
-        # Training Phase
-        model.train()
-        running_loss = 0.0
-        train_correct = 0
-        train_total = 0
-
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
-
-            # eval train
-            _, preds = torch.max(outputs, 1)
-            train_correct += (preds == labels).sum().item()
-            train_total += labels.size(0)
-
-        train_accuracy = train_correct / train_total
-        avg_train_loss = running_loss / len(train_loader)
-
-        # eval validation
-        model.eval()
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-        with torch.inference_mode():
-            for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                val_loss += loss.item()
-
-                # val accuracy
-                _, preds = torch.max(outputs, 1)
-                val_correct += (preds == labels).sum().item()
-                val_total += labels.size(0)
-
-        val_accuracy = val_correct / val_total
-        avg_val_loss = val_loss / len(val_loader)
-
-        train_losses.append(avg_train_loss)
-        val_losses.append(avg_val_loss)
-        train_accuracies.append(train_accuracy)
-        val_accuracies.append(val_accuracy)
-
-        # Save if best val acc
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
-            best_model = copy.deepcopy(model.state_dict())
-            torch.save(model.state_dict(), save_path)
-
-        # Print progress (less verbose for scripts)
-        if (epoch + 1) % 50 == 0:
-            print(
-                f"Epoch {epoch + 1}/{num_epochs}: "
-                f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
-                f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}"
-            )
-    
-    model.load_state_dict(best_model)
-    return model
 
 
 # Configuration
@@ -134,8 +51,8 @@ inform_fase = 0
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 36))  # 10 users for cross-subject
-frequencias_desejadas = frequencias[:]  # 8 frequencies
+users = list(range(1, 36))
+frequencias_desejadas = frequencias[:]
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 print("Users of interest:", users)
@@ -156,10 +73,8 @@ all_data = load_data_from_users(
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg_list = [0.6, 0.8, 1.0]
+tamanho_da_janela_seg_list = [0.8, 1.0]
 
-# Training parameters
-epochs = 1000
 
 # Experiment loop for each time window
 for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
@@ -169,16 +84,13 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"CCA_no_train_eegnet_full_dataset/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"CCA_trainable_eegnet_full_dataset/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     metricas_usuarios = []
-
     # Leave-one-user-out cross-validation
     for test_user_idx, test_user in enumerate(users):
-        # if test_user != 2 and tamanho_da_janela_seg == 0.4:
-        #     continue
         print(f"\nProcessing User {test_user}")
         train_users = [u for u in users if u != test_user]
         print(f"Train Users: {train_users}")
@@ -192,18 +104,18 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         num_canais, _, num_freqs, num_trials_train = train_data.shape
         num_trials_test = test_data.shape[-1]
 
-        # Prepare reference matrices for all frequencies (single window, no concatenation)
+        # Prepare reference matrices for all frequencies (no window separation)
         Y_train = np.zeros(
-            (tamanho_da_janela, num_harmonica * 2, len(indices))
+            (tamanho_da_janela * num_trials_train, num_harmonica * 2, len(indices))
         )
         Y_test = np.zeros(
-            (tamanho_da_janela, num_harmonica * 2, len(indices))
+            (tamanho_da_janela * num_trials_test, num_harmonica * 2, len(indices))
         )
         for k in indices:
             y_train = reference_matrix(
                 num_harmonica,
                 inform_fase,
-                1,
+                num_trials_train,
                 frequencias[k],
                 fases,
                 tamanho_da_janela,
@@ -212,45 +124,126 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             y_test = reference_matrix(
                 num_harmonica,
                 inform_fase,
-                1,
+                num_trials_test,
                 frequencias[k],
                 fases,
                 tamanho_da_janela,
             )
             Y_test[:, :, k] = y_test
 
-        # Build tensors with per-trial CCA application (no CCA training phase)
-        rotulos_treinamento = []
-        tensor_treinamento = np.zeros(
-            [len(indices) * num_trials_train, len(indices), tamanho_da_janela]
+        X_train = np.zeros(
+            (tamanho_da_janela * num_trials_train, len(occipital_electrodes), len(indices))
         )
-        rotulos_teste = []
-        tensor_teste = np.zeros(
-            [len(indices) * num_trials_test, len(indices), tamanho_da_janela]
+        X_test = np.zeros(
+            (tamanho_da_janela * num_trials_test, len(occipital_electrodes), len(indices))
         )
 
         for k in range(len(indices)):
-            for session in range(num_trials_train):
-                eeg_matrix_train = train_data[
-                    occipital_electrodes, :tamanho_da_janela, indices[k], session
-                ]
-                eeg_matrix_train = np.transpose(eeg_matrix_train)
-                rotulos_treinamento.append(k)
-                for freq in range(len(indices)):
-                    Wx, Wy, corr = CCA(eeg_matrix_train, Y_train[:, :, freq])
-                    tensor_treinamento[k * num_trials_train + session, freq, :] = np.dot(Wx, eeg_matrix_train.T)
+            # Extract training data for this frequency
+            eeg_matrix_train = train_data[
+                occipital_electrodes, :tamanho_da_janela, indices[k], :
+            ]
+            eeg_matrix_test = test_data[
+                occipital_electrodes, :tamanho_da_janela, indices[k], :
+            ]
+            # Transpose so each row represents a sample
+            eeg_matrix_train = np.transpose(eeg_matrix_train)
+            eeg_matrix_test = np.transpose(eeg_matrix_test)
+            eeg_matrix_train = np.concatenate(eeg_matrix_train, axis=0)
+            eeg_matrix_test = np.concatenate(eeg_matrix_test, axis=0)
 
-            for session in range(num_trials_test):
-                eeg_matrix_test = test_data[
-                    occipital_electrodes, :tamanho_da_janela, indices[k], session
-                ]
-                eeg_matrix_test = np.transpose(eeg_matrix_test)
-                rotulos_teste.append(k)
-                for freq in range(len(indices)):
-                    Wx, Wy, corr = CCA(eeg_matrix_test, Y_test[:, :, freq])
-                    tensor_teste[k * num_trials_test + session, freq, :] = np.dot(Wx, eeg_matrix_test.T)
+            X_train[:, :, k] = eeg_matrix_train
+            X_test[:, :, k] = eeg_matrix_test
 
-        # Convert to tensors
+        # CCA optimization (across all training data)
+        Combinadores_Y = []
+        Combinadores_X = []
+        correlacoes_max = []
+        for k in range(len(indices)):
+            Wx, Wy, corr = CCA(X_train[:, :, k], Y_train[:, :, k])
+            Combinadores_Y.append(Wy)
+            Combinadores_X.append(Wx)
+            correlacoes_max.append(corr)
+        Combinadores_X = np.column_stack(Combinadores_X)
+        Combinadores_Y = np.column_stack(Combinadores_Y)
+
+        # Split into windows
+        X_teste_janelas = []
+        X_treino_janelas = []
+        Y_teste_janelas = []
+        Y_treino_janelas = []
+
+        for k in range(len(indices)):
+            X_t, numero_janelas_teste = get_windows(
+                X_test[:, :, k], tamanho_da_janela, include_last=False
+            )
+            Y_t, _ = get_windows(Y_test[:, :, k], tamanho_da_janela, include_last=False)
+
+            X_v, numero_janelas_treino = get_windows(
+                X_train[:, :, k], tamanho_da_janela, include_last=False
+            )
+            Y_v, _ = get_windows(Y_train[:, :, k], tamanho_da_janela, include_last=False)
+
+            X_teste_janelas.append(X_t)
+            Y_teste_janelas.append(Y_t)
+
+            X_treino_janelas.append(X_v)
+            Y_treino_janelas.append(Y_v)
+
+        # Build training tensor with CCA projections
+        rotulos_treinamento = []
+        tensor_treinamento = np.zeros(
+            [len(indices) * numero_janelas_treino, len(indices), tamanho_da_janela]
+        )
+        cont = 0
+
+        for m in range(len(indices)):
+            for j in range(numero_janelas_treino):
+                janela_x = X_treino_janelas[m][j]
+                rotulos_treinamento.append(frequencias[indices[m]])
+                cont_1 = 0
+                for w in range(len(indices)):
+                    Wx = Combinadores_X[:, w]
+                    projecao_x = np.dot(Wx, janela_x.T)
+                    tensor_treinamento[cont, cont_1, :] = projecao_x
+                    cont_1 += 1
+                cont += 1
+
+        # Build test tensor with CCA projections
+        rotulos_teste = []
+        tensor_teste = np.zeros(
+            [len(indices) * numero_janelas_teste, len(indices), tamanho_da_janela]
+        )
+        cont = 0
+
+        for m in range(len(indices)):
+            for j in range(numero_janelas_teste):
+                janela_x = X_teste_janelas[m][j]
+                rotulos_teste.append(frequencias[indices[m]])
+                cont_1 = 0
+
+                for w in range(len(indices)):
+                    Wx = Combinadores_X[:, w]
+                    projecao_x = np.dot(Wx, janela_x.T)
+                    tensor_teste[cont, cont_1, :] = projecao_x
+                    cont_1 += 1
+                cont += 1
+
+        # Map labels to indices
+        mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
+        rotulos_treinamento = torch.tensor(
+            [
+                mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
+                for rotulo in rotulos_treinamento
+            ]
+        )
+        rotulos_teste = torch.tensor(
+            [
+                mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
+                for rotulo in rotulos_teste
+            ]
+        )
+
         X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32).to(device)
         X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
         Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long).to(device)
@@ -263,7 +256,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         # Model setup
         model = EEGNet(
-            n_chans=len(indices),
+            n_chans=len(indices),  # Number of CCA components (same as number of frequencies)
             n_outputs=len(frequencias_desejadas),
             n_times=tamanho_da_janela,
             kernel_length=(tamanho_da_janela // 2) if tamanho_da_janela > 2 else 1,
@@ -285,23 +278,10 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             TensorDataset(X_teste, Y_teste), batch_size=10, shuffle=False
         )
 
-        # # Train
-        print(f"Training for {epochs} epochs...")
-        best_model = train(
-            model,
-            train_loader,
-            val_loader,
-            criterion,
-            optimizer,
-            num_epochs=epochs,
-            device=device,
-            save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
-        )
 
         # Evaluate
-        # model.load_state_dict(torch.load(exp_dir.joinpath(f"best_model_user_{test_user}.pth")))
-        accuracy, recall, f1, cm = evaluate(best_model, test_loader)
-
+        model.load_state_dict(torch.load(exp_dir.joinpath(f"best_model_user_{test_user}.pth")))
+        accuracy, recall, f1, cm = evaluate(model, test_loader)
         metricas_usuarios.append(
             {
                 "usuario": test_user,

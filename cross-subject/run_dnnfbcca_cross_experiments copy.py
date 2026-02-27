@@ -21,7 +21,7 @@ from cross_subject_utils import (
     load_data_from_users,
     filter_signals_subbands,
 )
-from cca import CCA_otimizacao, matriz_referencia
+from cca import CCA, reference_matrix
 
 
 class SSVEPDNN(nn.Module):
@@ -240,7 +240,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             (tamanho_da_janela * num_trials_test, num_harmonica * 2, len(indices))
         )
         for k in indices:
-            y_train = matriz_referencia(
+            y_train = reference_matrix(
                 num_harmonica,
                 inform_fase,
                 num_trials_train,
@@ -249,7 +249,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 tamanho_da_janela,
             )
             Y_train[:, :, k] = y_train
-            y_test = matriz_referencia(
+            y_test = reference_matrix(
                 num_harmonica,
                 inform_fase,
                 num_trials_test,
@@ -307,7 +307,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             Combinadores_Y_sub = []
             Combinadores_X_sub = []
             for k in range(len(indices)):
-                Wx, Wy, _ = CCA_otimizacao(X_train[:, i, :, k], Y_train[:, :, k])
+                Wx, Wy, _ = CCA(X_train[:, i, :, k], Y_train[:, :, k])
                 Combinadores_Y_sub.append(Wy)
                 Combinadores_X_sub.append(Wx)
             Combinadores_X.append(np.column_stack(Combinadores_X_sub))

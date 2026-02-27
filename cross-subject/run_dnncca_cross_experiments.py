@@ -21,7 +21,7 @@ from cross_subject_utils import (
     load_data_from_users,
     filter_signals_subbands,
 )
-from cca import CCA_otimizacao, matriz_referencia
+from cca import CCA, reference_matrix
 
 
 class SSVEPDNN(nn.Module):
@@ -232,15 +232,14 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         num_canais, _, num_freqs, num_trials_train = train_data.shape
         num_trials_test = test_data.shape[-1]
 
-        # Prepare reference matrices for all frequencies (no window separation)
         Y_train = np.zeros(
-            (tamanho_da_janela * num_trials_train, num_harmonica * 2, len(indices))
+            (num_harmonica * 2, tamanho_da_janela * num_trials_train, len(indices))
         )
         Y_test = np.zeros(
-            (tamanho_da_janela * num_trials_test, num_harmonica * 2, len(indices))
+            (num_harmonica * 2, tamanho_da_janela * num_trials_test, len(indices))
         )
         for k in indices:
-            y_train = matriz_referencia(
+            y_train = reference_matrix(
                 num_harmonica,
                 inform_fase,
                 num_trials_train,
@@ -249,7 +248,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 tamanho_da_janela,
             )
             Y_train[:, :, k] = y_train
-            y_test = matriz_referencia(
+            y_test = reference_matrix(
                 num_harmonica,
                 inform_fase,
                 num_trials_test,
@@ -262,15 +261,15 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         # Extract EEG data for each frequency (without subband filtering)
         X_train = np.zeros(
             (
-                tamanho_da_janela * num_trials_train,
                 len(occipital_electrodes),
+                tamanho_da_janela * num_trials_train,
                 len(indices),
             )
         )
         X_test = np.zeros(
             (
-                tamanho_da_janela * num_trials_test,
                 len(occipital_electrodes),
+                tamanho_da_janela * num_trials_test,
                 len(indices),
             )
         )
@@ -283,34 +282,31 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             eeg_matrix_test = test_data[
                 occipital_electrodes, :tamanho_da_janela, indices[k], :
             ]
-            # Transpose so each row represents a sample
-            eeg_matrix_train = np.transpose(eeg_matrix_train)
-            eeg_matrix_test = np.transpose(eeg_matrix_test)
-            eeg_matrix_train = np.concatenate(eeg_matrix_train, axis=0)
-            eeg_matrix_test = np.concatenate(eeg_matrix_test, axis=0)
+            # Reshape to (num_channels, num_timepoints*num_trials) - keep standard BCI format
+            eeg_matrix_train = eeg_matrix_train.reshape(len(occipital_electrodes), -1)
+            eeg_matrix_test = eeg_matrix_test.reshape(len(occipital_electrodes), -1)
 
             X_train[:, :, k] = eeg_matrix_train
             X_test[:, :, k] = eeg_matrix_test
-
-        # CCA optimization (across all training data, on raw signal)
         Combinadores_Y = []
         Combinadores_X = []
         correlacoes_max = []
         for k in range(len(indices)):
-            Wx, Wy, corr = CCA_otimizacao(X_train[:, :, k], Y_train[:, :, k])
+            Wx, Wy, corr = CCA(X_train[:, :, k], Y_train[:, :, k])
             Combinadores_Y.append(Wy)
             Combinadores_X.append(Wx)
             correlacoes_max.append(corr)
         Combinadores_X = np.column_stack(Combinadores_X)
         Combinadores_Y = np.column_stack(Combinadores_Y)
 
-        # Split into windows
+        # Split into windows - get_windows handles both (channels, time) and (time, channels) formats
         X_teste_janelas = []
         X_treino_janelas = []
         Y_teste_janelas = []
         Y_treino_janelas = []
 
         for k in range(len(indices)):
+            # get_windows automatically handles (channels, timepoints) format
             X_t, numero_janelas_teste = get_windows(
                 X_test[:, :, k], tamanho_da_janela, include_last=False
             )
@@ -336,13 +332,13 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         for m in range(len(indices)):
             for j in range(numero_janelas_treino):
-                janela_x = X_treino_janelas[m][j]
+                janela_x = X_treino_janelas[m][j]  # shape: (num_channels, num_timepoints)
                 rotulos_treinamento.append(frequencias[indices[m]])
                 cont_1 = 0
                 for w in range(len(indices)):
                     Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x.T)
+                    janela_x = janela_x - np.mean(janela_x, axis=1, keepdims=True)
+                    projecao_x = np.dot(Wx, janela_x)  # (num_channels,) @ (num_channels, num_timepoints) = (num_timepoints,)
                     tensor_treinamento[cont, cont_1, :] = projecao_x
                     cont_1 += 1
                 cont += 1
@@ -356,14 +352,14 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         for m in range(len(indices)):
             for j in range(numero_janelas_teste):
-                janela_x = X_teste_janelas[m][j]
+                janela_x = X_teste_janelas[m][j]  # shape: (num_channels, num_timepoints)
                 rotulos_teste.append(frequencias[indices[m]])
                 cont_1 = 0
 
                 for w in range(len(indices)):
                     Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x.T)
+                    janela_x = janela_x - np.mean(janela_x, axis=1, keepdims=True)
+                    projecao_x = np.dot(Wx, janela_x)  # (num_channels,) @ (num_channels, num_timepoints) = (num_timepoints,)
                     tensor_teste[cont, cont_1, :] = projecao_x
                     cont_1 += 1
                 cont += 1

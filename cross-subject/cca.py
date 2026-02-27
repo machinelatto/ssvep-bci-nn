@@ -1,7 +1,25 @@
 import numpy as np
 
 
-def CCA_otimizacao(X, Y):
+def CCA(X: np.ndarray, Y: np.ndarray):
+    """Canonical Correlation Analysis for SSVEP BCI
+
+    Standard format for EEG/BCI applications:
+    - X: EEG signals, shape (num_channels, num_timepoints)
+    - Y: Reference signals, shape (num_features, num_timepoints)
+
+    Args:
+        X (np.ndarray): EEG signal matrix, shape (num_channels, num_timepoints)
+        Y (np.ndarray): Reference signal matrix, shape (num_features, num_timepoints)
+
+    Returns:
+        Wx (np.ndarray): Spatial filter for X (num_channels,)
+        Wy (np.ndarray): Spatial filter for Y (num_features,)
+        correlation (float): Canonical correlation value
+    """
+    # Transpose to (num_timepoints, num_channels/features) for covariance calculation
+    X = X.T  # shape: (num_timepoints, num_channels)
+    Y = Y.T  # shape: (num_timepoints, num_features)
 
     # Calcula as linhas e colunas da matriz X
     linhas_X, colunas_X = X.shape
@@ -82,9 +100,26 @@ def CCA_otimizacao(X, Y):
     return Wx, Wy, Lambda[0]
 
 
-def matriz_referencia(
-    numero_de_harmonicas, fase_inicial, sessoes, frequencia, fase, numero_de_amostras
+def reference_matrix(
+    numero_de_harmonicas=3, fase_inicial=0, sessoes=1, frequencia=10, fase=0, numero_de_amostras=250
 ):
+    """Generate reference signals for SSVEP CCA
+
+    Returns shape (num_harmonics*2, num_timepoints*num_sessions) following standard BCI convention:
+    - Rows: features (sine/cosine pairs at different harmonics)
+    - Columns: time points
+
+    Args:
+        numero_de_harmonicas: Number of harmonics to generate
+        fase_inicial: Initial phase flag (0 = no phase, else use phase)
+        sessoes: Number of sessions to tile
+        frequencia: Frequency in Hz
+        fase: Phase offset
+        numero_de_amostras: Number of time samples per session
+
+    Returns:
+        Y: Reference signal matrix, shape (num_harmonics*2, num_timepoints*num_sessions)
+    """
     # Taxa de amostragem
     dt = 1 / 250
     # Número de amostras
@@ -97,19 +132,13 @@ def matriz_referencia(
     else:
         theta = fase
 
-    # print(f"theta: {theta}")
     # Gerando sinais senoidais e cossenoidais
     for k in range(1, numero_de_harmonicas + 1):
         y1 = np.sin(2 * np.pi * k * frequencia * t + theta)
         y2 = np.cos(2 * np.pi * k * frequencia * t + theta)
         y.append(y1)
         y.append(y2)
-    # Transpõe o array Y
-    y = np.array(y)
-    y = np.transpose(y)
-    # Repete o array para coincidir com o número de sessões
-    # print(f"y shape: {y.shape}")
-    Y = np.tile(y, (sessoes, 1))
-    # print(f"Y shape: {Y.shape}")
-    # Retorna a Matriz de sinais de referência
+    # Keep as (num_harmonics*2, num_timepoints) - standard BCI format
+    y = np.array(y)  # shape: (num_harmonics*2, num_timepoints)
+    Y = np.tile(y, (1, sessoes))  # shape: (num_harmonics*2, num_timepoints*num_sessions)
     return Y

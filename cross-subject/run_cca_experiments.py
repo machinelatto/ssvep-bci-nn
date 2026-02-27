@@ -3,26 +3,24 @@ from pathlib import Path
 import numpy as np
 import scipy
 
-
-# # Utilities
 from cross_subject_utils import (
     evaluate,
     load_data_from_users,
 )
 
 from sklearn.metrics import (
-    ConfusionMatrixDisplay,
     confusion_matrix,
     f1_score,
     recall_score,
     accuracy_score,
 )
 import matplotlib.pyplot as plt
-from cca import CCA_otimizacao, matriz_referencia
+from cca import CCA, reference_matrix
 
 def evaluate(all_labels, all_preds):
     accuracy = accuracy_score(all_labels, all_preds)
     recall = recall_score(all_labels, all_preds, average="weighted")
+    recall_macro = recall_score(all_labels, all_preds, average="macro")
     f1 = f1_score(all_labels, all_preds, average="weighted")
     cm = confusion_matrix(all_labels, all_preds)
     print(f"Test set Accuracy: {accuracy:.4f}")
@@ -47,17 +45,16 @@ fases = freq_phase["phases"]
 # Parâmetros do pré-processamento
 sample_rate = 250
 filter_order = 10
-freq_cut_high = 70
+freq_cut_high = 50
 freq_cut_low = 6
 delay = 160
 
 # Parâmetros do CCA
-num_harmonica = 5
+num_harmonica = 3
 inform_fase = 0
 
 # Usuários
-# users = list(range(1, 11))  # Usuários de 1 a 10
-users = list(range(1, 36))  # Usuários de 1 a 35
+users = list(range(1, 3))  # Usuários de 1 a 35
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 frequencias_desejadas = frequencias[:] # Todas as frequências
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
@@ -85,7 +82,7 @@ for tamanho in tamanho_da_janela_seg:
     print(f"Tamanho da janela: {tamanho_da_janela} samples ({tamanho} s)")
 
     exp_dir = Path(
-        f"CCA_full_dataset/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
+        f"CCA/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
     )
 
     # Cross-Subject EEGNet Training (single window per trial, no window separation)
@@ -99,13 +96,13 @@ for tamanho in tamanho_da_janela_seg:
         test_data = all_data[test_user_idx]
         num_trials_test = test_data.shape[-1]
 
-        Y_test = np.zeros((tamanho_da_janela, num_harmonica * 2, len(indices)))
-        for k in indices:
-            y_test = matriz_referencia(
+        Y_test = np.zeros((num_harmonica * 2, tamanho_da_janela, len(indices)))
+        for k in range(len(indices)):
+            y_test = reference_matrix(
                 num_harmonica,
                 inform_fase,
                 1,
-                frequencias[k],
+                frequencias[indices[k]],
                 fases,
                 tamanho_da_janela,
             )
@@ -115,20 +112,19 @@ for tamanho in tamanho_da_janela_seg:
         predictions = []
         for k in range(len(indices)):
             for session in range(num_trials_test):
-                # For training: each trial is a single window
+                # Extract EEG for this trial: shape (num_channels, num_timepoints)
                 eeg_matrix_test = test_data[
                     occipital_electrodes, :tamanho_da_janela, indices[k], session
                 ]
-
-                # Transpõe os dados para que cada linha represente uma amostra
-                eeg_matrix_test = np.transpose(eeg_matrix_test)
-                labels.append(k)
+                # NO TRANSPOSE - keep standard BCI format: (num_channels, num_timepoints)
+                labels.append(indices[k])
                 corrs = np.zeros(len(indices))
                 for freq in range(len(indices)):
-                    Wx, Wy, corr = CCA_otimizacao(eeg_matrix_test, Y_test[:, :, freq])
+                    # Y_test[:, :, freq] has shape (num_harmonics*2, num_timepoints)
+                    Wx, Wy, corr = CCA(eeg_matrix_test, Y_test[:, :, freq])
                     corrs[freq] = corr
                 predicted_label = np.argmax(corrs)
-                predictions.append(predicted_label)
+                predictions.append(indices[predicted_label])
 
         accuracy, recall, f1, cm = evaluate(labels, predictions)
         metricas_usuarios.append(

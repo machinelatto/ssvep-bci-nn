@@ -43,7 +43,7 @@ def plot_learning_curves(train_losses, val_losses, train_accuracies, val_accurac
 
 
 def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
-    """Filter EEG signals and divide into sub-bands. High cutoff is fixed at 90 Hz. Low cutoff starts at 8 Hz and increases in steps of 8 Hz.
+    """Filter EEG signals and divide into sub-bands. High cutoff is fixed at 50 Hz. Low cutoff starts at 8 Hz and increases in steps of 8 Hz.
 
     Args:
         eeg_signals (np.ndarray): Input EEG signals of shape (samples, channels, time).
@@ -54,19 +54,11 @@ def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
         np.ndarray: Filtered EEG signals divided into sub-bands. Has shape (samples, subbands, channels, time).
     """
     samples, total_channels, sample_length = eeg_signals.shape
-
     all_data = np.zeros((samples, subban_no, total_channels, sample_length))
     print(f"All data shape before filtering: {eeg_signals.shape}")
 
     # Bandpass filters
-    high_cutoff = [90] * subban_no
-
-    samples, total_channels, sample_length = eeg_signals.shape
-
-    all_data = np.zeros((samples, subban_no, total_channels, sample_length))
-
-    # Bandpass filters
-    high_cutoff = [90] * subban_no
+    high_cutoff = [50] * subban_no
     low_cutoff = [i for i in range(8, 8 * (subban_no + 1), 8)]
     filter_order = 2
     passband_ripple = 1
@@ -101,21 +93,46 @@ def get_windows(eeg_matrix, window_size, include_last=False):
     """Extract sliding windows from the EEG matrix.
 
     Args:
-        eeg_matrix (np.ndarray): Input EEG matrix of shape (time, channels).
-        window_size (int): Size of each window.
+        eeg_matrix (np.ndarray): Input EEG matrix. Supports both:
+            - Standard BCI format: shape (channels, timepoints)
+            - Time-first format: shape (timepoints, channels)
+        window_size (int): Size of each window (in time samples).
         include_last (bool, optional): Whether to include the last window if it's smaller than window_size. Defaults to False.
 
     Returns:
-        list: List of extracted windows.
+        tuple: (list of windows, num_windows)
+            - If input is (channels, timepoints): each window has shape (channels, window_size)
+            - If input is (timepoints, channels): each window has shape (window_size, channels)
     """
-    total_samples = eeg_matrix.shape[0]
+    # Determine which axis contains time samples
+    # We check if the first dimension is likely time (typically larger) or channels (typically smaller, e.g., 9-64)
+    # For BCI data: channels are usually 8-64, timepoints are typically 100-1000+
+    if eeg_matrix.shape[0] > eeg_matrix.shape[1]:
+        # Likely (timepoints, channels) - time is first dimension
+        time_axis = 0
+        total_samples = eeg_matrix.shape[0]
+    else:
+        # Likely (channels, timepoints) - time is second dimension
+        time_axis = 1
+        total_samples = eeg_matrix.shape[1]
+
     num_windows = total_samples // window_size
     windows = []
-    for i in range(0, total_samples, window_size):
-        window = eeg_matrix[i : i + window_size]
-        windows.append(window)
+
+    if time_axis == 0:
+        # (timepoints, channels) format
+        for i in range(0, total_samples, window_size):
+            window = eeg_matrix[i : i + window_size]
+            windows.append(window)
+    else:
+        # (channels, timepoints) format
+        for i in range(0, total_samples, window_size):
+            window = eeg_matrix[:, i : i + window_size]
+            windows.append(window)
+
     if not include_last and total_samples % window_size != 0:
         windows.pop()
+
     return windows, num_windows
 
 

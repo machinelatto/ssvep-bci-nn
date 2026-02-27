@@ -1,6 +1,6 @@
 """
 Run EEGNet cross-subject experiments with full dataset (35 users, 40 frequencies)
-for all time lengths (0.4s, 0.6s, 0.8s, 1.0s).
+for all time lengths.
 """
 
 import numpy as np
@@ -17,7 +17,6 @@ import scipy.io
 from braindecode.models import EEGNet
 
 from cross_subject_utils import (
-    plot_learning_curves,
     evaluate,
     load_data_from_users,
 )
@@ -37,7 +36,7 @@ def train(
     model.to(device)
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
-    
+
     for epoch in tqdm(range(num_epochs)):
         # Training Phase
         model.train()
@@ -98,7 +97,7 @@ def train(
             f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
             f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
         )
-    
+
     # plot_learning_curves(train_losses, val_losses, train_accuracies, val_accuracies)
     model.load_state_dict(best_model)
     return model
@@ -121,14 +120,14 @@ fases = frequencias_e_fases["phases"]
 
 # Preprocessing parameters
 filter_order = 10
-freq_cut_high = 70
+freq_cut_high = 50
 freq_cut_low = 6
 sample_rate = 250
 delay = 160
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 36))  # 35 users (full dataset)
+users = list(range(1, 3))  # 35 users (full dataset)
 frequencias_desejadas = frequencias[:]  # All 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
@@ -162,19 +161,16 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"EEGNet_full_dataset/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
+        f"EEGNet_test/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
-    metricas_usuarios = []
+    metrics = []
 
     # Leave-one-user-out cross-validation
-    for user in range(1, len(all_data) + 1):
-        print(f"\nProcessing User {user}")
-        n_freqs_sel = len(indices)
-        metricas_crossval = []
-        users_train = [u for u in range(1, len(all_data) + 1) if u != user]
-        user_test = user
+    for test_user_idx, test_user in enumerate(users):
+        print(f"\nProcessing User {test_user}")
+        train_users = [u for u in users if u != test_user]
 
         x_train = []
         labels_train = []
@@ -182,22 +178,20 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
         labels_test = []
 
         # Train data
-        for u in users_train:
+        for u in train_users:
             data = all_data[u - 1]
             for session in range(data.shape[3]):
-                for freq in range(len(indices)):
-                    eeg_trial = data[occipital_electrodes, :, indices[freq], session]
-                    eeg_trial = eeg_trial[:, :tamanho_da_janela]
+                for freq in indices:
+                    eeg_trial = data[occipital_electrodes, :tamanho_da_janela, freq, session]
                     x_train.append(eeg_trial)
                     labels_train.extend([frequencias[freq]])
         x_train = np.array(x_train)
 
         # Test data
-        data = all_data[user_test - 1]
+        data = all_data[test_user - 1]
         for session in range(data.shape[3]):
-            for freq in range(len(indices)):
-                eeg_trial = data[occipital_electrodes, :, indices[freq], session]
-                eeg_trial = eeg_trial[:, :tamanho_da_janela]
+            for freq in indices:
+                eeg_trial = data[occipital_electrodes, :tamanho_da_janela, freq, session]
                 x_test.append(eeg_trial)
                 labels_test.extend([frequencias[freq]])
         x_test = np.array(x_test)
@@ -254,16 +248,16 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             optimizer,
             num_epochs=epochs,
             device=device,
-            save_path=exp_dir.joinpath(f"best_model_user_{user}.pth"),
+            save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
         )
 
         # Evaluate
         accuracy, recall, f1, cm = evaluate(best_model, test_loader)
 
         # Store metrics
-        metricas_crossval.append(
+        metrics.append(
             {
-                "usuario": user,
+                "usuario": test_user,
                 "acuracia": accuracy,
                 "recall": recall,
                 "f1-score": f1,
@@ -272,12 +266,11 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
         )
 
         print(
-            f"User {user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
+            f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
 
         # Save metrics
-        metricas_usuarios.extend(metricas_crossval)
-        df_metricas = pd.DataFrame(metricas_usuarios)
+        df_metricas = pd.DataFrame(metrics)
         df_metricas.to_csv(exp_dir.joinpath("metricas.csv"), index=False)
 
         print("-" * 50)
