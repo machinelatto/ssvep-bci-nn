@@ -189,3 +189,5 @@ cython_debug/
 
 # VSCODE config
 settings.json
+
+cross-subject/pre-*
