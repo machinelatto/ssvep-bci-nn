@@ -17,7 +17,8 @@ import torch.nn.functional as F
 import optuna
 from optuna.trial import Trial
 from optuna.samplers import TPESampler
-
+import sys
+sys.path.insert(0, str(Path.cwd().parent))
 from cross_subject_utils import (
     evaluate,
     load_data_from_users,
@@ -55,6 +56,15 @@ class SSVEPDNN(nn.Module):
     def _initialize_weights(self):
         with torch.no_grad():
             self.subband_combination.weight.fill_(1.0)
+            for m in self.modules():
+                if isinstance(m, nn.Conv2d) and m != self.subband_combination:
+                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                    nn.init.zeros_(m.bias)
+
 
     def forward(self, x):
         # x shape: [batch, subbands, channels, time]
@@ -68,8 +78,8 @@ class SSVEPDNN(nn.Module):
         x = self.drop3(x)
         x = x.view(x.size(0), -1)  # Flatten
         x = self.fc(x)  # [batch, num_classes]
-        output = F.softmax(x, dim=1)
-        return output
+        # output = F.softmax(x, dim=1)
+        return x
 
 
 def train(

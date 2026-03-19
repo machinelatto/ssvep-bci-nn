@@ -18,7 +18,8 @@ from braindecode.models import EEGNet
 import optuna
 from optuna.trial import Trial
 from optuna.samplers import TPESampler
-
+import sys
+sys.path.insert(0, str(Path.cwd().parent))
 from cross_subject_utils import (
     evaluate,
     load_data_from_users,
@@ -158,6 +159,7 @@ def objective_per_user(
     F1 = trial.suggest_categorical("F1", [4, 8, 16, 32, 64])
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
+    drop_prob = trial.suggest_float("drop_prob", 0.0, 0.5)
     optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
 
@@ -182,6 +184,8 @@ def objective_per_user(
         n_times=tamanho_da_janela,
         kernel_length=(sample_rate // 2),
         F1=F1,
+        D=2,
+        drop_prob=drop_prob,
     )
     model = model.to(device)
 
@@ -396,6 +400,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             "best_batch_size": best_params.get("batch_size"),
             "best_optimizer": best_params.get("optimizer"),
             "best_weight_decay": best_params.get("weight_decay"),
+            "best_drop_prob": best_params.get("drop_prob"),
             "best_tuning_accuracy": study.best_value,
             "n_trials": len(study.trials),
         })
