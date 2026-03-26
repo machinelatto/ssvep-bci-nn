@@ -12,63 +12,14 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-import scipy.io
-import torch.nn.functional as F
 
 from cross_subject_utils import (
     evaluate,
-    get_windows,
+    EarlyStopping,
     load_data_from_users,
-    filter_signals_subbands,
 )
-from cca import CCA, reference_matrix
-
-
-class SSVEPDNN(nn.Module):
-    """SSVEP Deep Neural Network with subband processing."""
-    def __init__(self, num_classes=40, channels=9, samples=250, subbands=3):
-        super(SSVEPDNN, self).__init__()
-        # [batch, subbands, channels, time]
-        # Subband combination layer
-        self.subband_combination = nn.Conv2d(
-            subbands, 1, kernel_size=(1, 1), bias=False
-        )
-        # Channel combination layer
-        self.channel_combination = nn.Conv2d(1, 120, kernel_size=(channels, 1))
-        # First dropout
-        self.drop1 = nn.Dropout(0.1)
-        # Third layer - Time convolution
-        self.third_conv = nn.Conv2d(120, 120, kernel_size=(1, 2), stride=(1, 2))
-        # Second dropout
-        self.drop2 = nn.Dropout(0.1)
-        self.relu = nn.ReLU()
-        # 4th conv - FIR filtering
-        self.fourth_conv = nn.Conv2d(120, 120, kernel_size=(1, 10), padding="same")
-        self.drop3 = nn.Dropout(0.95)
-
-        # Fully connected layer - Classifier
-        self.fc = nn.Linear(120 * (samples // 2), num_classes)
-
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        with torch.no_grad():
-            self.subband_combination.weight.fill_(1.0)
-
-    def forward(self, x):
-        # x shape: [batch, subbands, channels, time]
-        x = self.subband_combination(x)  # [batch, 1, channels, time]
-        x = self.channel_combination(x)  # [batch, 120, 1, time]
-        x = self.drop1(x)
-        x = self.third_conv(x)  # [batch, 120, 1, time/2]
-        x = self.drop2(x)
-        x = self.relu(x)
-        x = self.fourth_conv(x)  # [batch, 120, 1, time/2]
-        x = self.drop3(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.fc(x)  # [batch, num_classes]
-        output = F.softmax(x, dim=1)
-        return output
+from benchmark_dataset import build_tensors_with_cca, load_freq_phase
+from dnn import SSVEPDNN
 
 
 def train(
@@ -80,13 +31,13 @@ def train(
     num_epochs=100,
     device=0,
     save_path="best_model.pth",
+    early_stopping=None,
 ):
-    """Train the model with early stopping based on validation accuracy."""
-    best_val_accuracy = -float("inf")
+    """Train the model with optional early stopping based on validation metrics."""
     model.to(device)
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
-    
+
     for epoch in tqdm(range(num_epochs)):
         # Training Phase
         model.train()
@@ -136,12 +87,6 @@ def train(
         train_accuracies.append(train_accuracy)
         val_accuracies.append(val_accuracy)
 
-        # Save if best val acc
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
-            best_model = copy.deepcopy(model.state_dict())
-            torch.save(model.state_dict(), save_path)
-
         # Print progress (less verbose for scripts)
         if (epoch + 1) % 50 == 0:
             print(
@@ -149,8 +94,24 @@ def train(
                 f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
                 f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}"
             )
-    
-    model.load_state_dict(best_model)
+
+        # Early stopping check (if provided)
+        if early_stopping is not None:
+            if early_stopping(model, val_loss, epoch):
+                print(f"Early stopping triggered at epoch {epoch + 1}")
+                break
+        else:
+            # Fallback: save best model if no early stopping
+            if epoch == 0 or val_accuracy > max(val_accuracies[:-1]):
+                torch.save(model.state_dict(), save_path)
+
+    # Load best model (either from early stopping or training)
+    if early_stopping is not None:
+        model = early_stopping.load_best_model(model)
+        # torch.save(model.state_dict(), save_path)
+    else:
+        model.load_state_dict(torch.load(save_path))
+
     return model
 
 
@@ -164,24 +125,26 @@ np.random.seed(seed)
 print(f"Using device: {device}")
 
 # Load frequency and phase information
-freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
-freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase()
 
 # Preprocessing parameters
 sample_rate = 250
 delay = 160
 
 # CCA parameters
-num_harmonica = 5
+num_harmonica = 3
 inform_fase = 0
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 11))  # 10 users for cross-subject
-frequencias_desejadas = frequencias[:8]  # 8 frequencies
+users = list(range(1, 36))  # 35 users for cross-subject
+frequencias_desejadas = frequencias[:8]  # first 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
+
+# Optional CAR configuration on loaded data
+apply_car = True
+car_reference_channels = occipital_electrodes
+car_target_channels = occipital_electrodes
 
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
@@ -190,15 +153,18 @@ print("Indices of frequencies of interest:", indices)
 # Load all data
 print("\nLoading data from all users...")
 all_data = load_data_from_users(
-    dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     users=users,
+    dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     visual_delay=delay,
     filter_bandpass=False,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg_list = [0.4, 0.6, 0.8, 1.0]
+tamanho_da_janela_seg_list = [1.0]
 
 # Training parameters
 epochs = 1000
@@ -211,7 +177,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"CCA_dnn_8_10/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"35_8_optimized/CCA_DNN_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -229,161 +195,38 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         )  # shape: (channels, samples, freqs, trials)
         test_data = all_data[test_user_idx]
 
-        num_canais, _, num_freqs, num_trials_train = train_data.shape
-        num_trials_test = test_data.shape[-1]
-
-        Y_train = np.zeros(
-            (num_harmonica * 2, tamanho_da_janela * num_trials_train, len(indices))
-        )
-        Y_test = np.zeros(
-            (num_harmonica * 2, tamanho_da_janela * num_trials_test, len(indices))
-        )
-        for k in indices:
-            y_train = reference_matrix(
+        tensor_treinamento, tensor_teste, labels_train, labels_test, channels_for_model = (
+            build_tensors_with_cca(
+                train_data,
+                test_data,
+                occipital_electrodes,
+                frequencias,
+                fases,
+                indices,
                 num_harmonica,
                 inform_fase,
-                num_trials_train,
-                frequencias[k],
-                fases,
                 tamanho_da_janela,
-            )
-            Y_train[:, :, k] = y_train
-            y_test = reference_matrix(
-                num_harmonica,
-                inform_fase,
-                num_trials_test,
-                frequencias[k],
-                fases,
-                tamanho_da_janela,
-            )
-            Y_test[:, :, k] = y_test
-
-        # Extract EEG data for each frequency (without subband filtering)
-        X_train = np.zeros(
-            (
-                len(occipital_electrodes),
-                tamanho_da_janela * num_trials_train,
-                len(indices),
+                mean_center=True,
+                apply_subband_filter=True,
+                subban_no=3,
+                sampling_rate=sample_rate,
             )
         )
-        X_test = np.zeros(
-            (
-                len(occipital_electrodes),
-                tamanho_da_janela * num_trials_test,
-                len(indices),
-            )
-        )
-
-        for k in range(len(indices)):
-            # Extract training data for this frequency
-            eeg_matrix_train = train_data[
-                occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ]
-            eeg_matrix_test = test_data[
-                occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ]
-            # Reshape to (num_channels, num_timepoints*num_trials) - keep standard BCI format
-            eeg_matrix_train = eeg_matrix_train.reshape(len(occipital_electrodes), -1)
-            eeg_matrix_test = eeg_matrix_test.reshape(len(occipital_electrodes), -1)
-
-            X_train[:, :, k] = eeg_matrix_train
-            X_test[:, :, k] = eeg_matrix_test
-        Combinadores_Y = []
-        Combinadores_X = []
-        correlacoes_max = []
-        for k in range(len(indices)):
-            Wx, Wy, corr = CCA(X_train[:, :, k], Y_train[:, :, k])
-            Combinadores_Y.append(Wy)
-            Combinadores_X.append(Wx)
-            correlacoes_max.append(corr)
-        Combinadores_X = np.column_stack(Combinadores_X)
-        Combinadores_Y = np.column_stack(Combinadores_Y)
-
-        # Split into windows - get_windows handles both (channels, time) and (time, channels) formats
-        X_teste_janelas = []
-        X_treino_janelas = []
-        Y_teste_janelas = []
-        Y_treino_janelas = []
-
-        for k in range(len(indices)):
-            # get_windows automatically handles (channels, timepoints) format
-            X_t, numero_janelas_teste = get_windows(
-                X_test[:, :, k], tamanho_da_janela, include_last=False
-            )
-            Y_t, _ = get_windows(Y_test[:, :, k], tamanho_da_janela, include_last=False)
-
-            X_v, numero_janelas_treino = get_windows(
-                X_train[:, :, k], tamanho_da_janela, include_last=False
-            )
-            Y_v, _ = get_windows(Y_train[:, :, k], tamanho_da_janela, include_last=False)
-
-            X_teste_janelas.append(X_t)
-            Y_teste_janelas.append(Y_t)
-
-            X_treino_janelas.append(X_v)
-            Y_treino_janelas.append(Y_v)
-
-        # Build training tensor with CCA projections
-        rotulos_treinamento = []
-        tensor_treinamento = np.zeros(
-            [len(indices) * numero_janelas_treino, len(indices), tamanho_da_janela]
-        )
-        cont = 0
-
-        for m in range(len(indices)):
-            for j in range(numero_janelas_treino):
-                janela_x = X_treino_janelas[m][j]  # shape: (num_channels, num_timepoints)
-                rotulos_treinamento.append(frequencias[indices[m]])
-                cont_1 = 0
-                for w in range(len(indices)):
-                    Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=1, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x)  # (num_channels,) @ (num_channels, num_timepoints) = (num_timepoints,)
-                    tensor_treinamento[cont, cont_1, :] = projecao_x
-                    cont_1 += 1
-                cont += 1
-
-        # Build test tensor with CCA projections
-        rotulos_teste = []
-        tensor_teste = np.zeros(
-            [len(indices) * numero_janelas_teste, len(indices), tamanho_da_janela]
-        )
-        cont = 0
-
-        for m in range(len(indices)):
-            for j in range(numero_janelas_teste):
-                janela_x = X_teste_janelas[m][j]  # shape: (num_channels, num_timepoints)
-                rotulos_teste.append(frequencias[indices[m]])
-                cont_1 = 0
-
-                for w in range(len(indices)):
-                    Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=1, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x)  # (num_channels,) @ (num_channels, num_timepoints) = (num_timepoints,)
-                    tensor_teste[cont, cont_1, :] = projecao_x
-                    cont_1 += 1
-                cont += 1
 
         # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
         rotulos_treinamento = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
-                for rotulo in rotulos_treinamento
+                for rotulo in labels_train
             ]
         )
         rotulos_teste = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
-                for rotulo in rotulos_teste
+                for rotulo in labels_test
             ]
         )
-
-        # Apply subband filtering to tensors
-        tensor_treinamento = filter_signals_subbands(
-            tensor_treinamento, subban_no=3, sampling_rate=250
-        )
-        tensor_teste = filter_signals_subbands(tensor_teste, subban_no=3, sampling_rate=250)
 
         X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32).to(device)
         X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
@@ -398,13 +241,24 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         # Model setup
         model = SSVEPDNN(
             num_classes=len(frequencias_desejadas),
-            channels=len(indices),
+            channels=channels_for_model,
             samples=tamanho_da_janela,
             subbands=3,
+            first_dropout=0.5,
+            second_dropout=0.5,
+            third_dropout=0.95,
         )
         model = model.to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0001)
+        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
+
+        # Initialize early stopping
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=500,
+            verbose=True,
+            delta=0.0001
+        )
 
         dataset = TensorDataset(X_treino, Y_treino)
         train_size = int(0.85 * len(dataset))
@@ -412,7 +266,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         train_dataset, val_dataset = random_split(
             dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed)
         )
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
         test_loader = DataLoader(
             TensorDataset(X_teste, Y_teste), batch_size=10, shuffle=False
@@ -429,6 +283,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             num_epochs=epochs,
             device=device,
             save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
+            early_stopping=early_stopping,
         )
 
         # Evaluate
@@ -440,7 +295,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 "acuracia": accuracy,
                 "recall": recall,
                 "f1-score": f1,
-                "confusion_matrix": cm,
+                # "confusion_matrix": cm,
             }
         )
         print(

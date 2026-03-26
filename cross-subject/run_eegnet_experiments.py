@@ -13,13 +13,14 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-import scipy.io
 from braindecode.models import EEGNet
 
 from cross_subject_utils import (
     evaluate,
+    EarlyStopping,
     load_data_from_users,
 )
+from benchmark_dataset import build_tensors_no_cca, load_freq_phase
 
 
 def train(
@@ -31,8 +32,9 @@ def train(
     num_epochs=100,
     device=0,
     save_path="best_model.pth",
+    early_stopping=None,
 ):
-    best_val_accuracy = -float("inf")
+    """Train the model with optional early stopping based on validation metrics."""
     model.to(device)
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
@@ -86,20 +88,30 @@ def train(
         train_accuracies.append(train_accuracy)
         val_accuracies.append(val_accuracy)
 
-        # Save if best vall acc
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
-            best_model = copy.deepcopy(model.state_dict())
-            torch.save(model.state_dict(), save_path)
+        if (epoch + 1) % 50 == 0:
+            print(
+                f"Epoch {epoch + 1}/{num_epochs}: "
+                f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
+                f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
+            )
 
-        print(
-            f"Epoch {epoch + 1}/{num_epochs}: "
-            f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
-            f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
-        )
+        # Early stopping check (if provided)
+        if early_stopping is not None:
+            if early_stopping(model, val_loss, epoch):
+                print(f"Early stopping triggered at epoch {epoch + 1}")
+                break
+        else:
+            # Fallback: save best model if no early stopping
+            if epoch == 0 or val_accuracy > max(val_accuracies[:-1]):
+                torch.save(model.state_dict(), save_path)
 
-    # plot_learning_curves(train_losses, val_losses, train_accuracies, val_accuracies)
-    model.load_state_dict(best_model)
+    # Load best model (either from early stopping or training)
+    if early_stopping is not None:
+        model = early_stopping.load_best_model(model)
+        # torch.save(model.state_dict(), save_path)
+    else:
+        model.load_state_dict(torch.load(save_path))
+    
     return model
 
 
@@ -111,12 +123,7 @@ torch.manual_seed(seed)
 np.random.seed(seed)
 
 # Load frequency and phase information
-frequencias_e_fases = scipy.io.loadmat(
-    "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
-)
-frequencias = frequencias_e_fases["freqs"]
-frequencias = np.round(frequencias, 2).ravel()
-fases = frequencias_e_fases["phases"]
+frequencias, _ = load_freq_phase()
 
 # Preprocessing parameters
 filter_order = 10
@@ -127,9 +134,14 @@ delay = 160
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 3))  # 35 users (full dataset)
-frequencias_desejadas = frequencias[:]  # All 40 frequencies
+users = list(range(1, 36))  # 35 users (full dataset)
+frequencias_desejadas = frequencias[:8]  # First 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
+
+# Optional CAR configuration on loaded data
+apply_car = True
+car_reference_channels = occipital_electrodes
+car_target_channels = occipital_electrodes
 
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
@@ -138,10 +150,13 @@ print("Indices of frequencies of interest:", indices)
 # Load all data
 print("\nLoading data from all users...")
 all_data = load_data_from_users(
-    dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     users=users,
+    dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     visual_delay=delay,
     filter_bandpass=True,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
     freq_cut_low=freq_cut_low,
     freq_cut_high=freq_cut_high,
@@ -149,7 +164,7 @@ all_data = load_data_from_users(
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg = [0.4, 0.6, 0.8, 1.0]
+tamanho_da_janela_seg = [1.0]
 
 # Training parameters
 epochs = 1000
@@ -161,7 +176,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"EEGNet_test/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
+        f"35_8_optimized/EEGNET_8_2_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -172,34 +187,37 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
         print(f"\nProcessing User {test_user}")
         train_users = [u for u in users if u != test_user]
 
-        x_train = []
-        labels_train = []
-        x_test = []
-        labels_test = []
+        train_data = np.concatenate(
+            [all_data[users.index(u)] for u in train_users], axis=-1
+        )
+        test_data = all_data[test_user_idx]
 
-        # Train data
-        for u in train_users:
-            data = all_data[u - 1]
-            for session in range(data.shape[3]):
-                for freq in indices:
-                    eeg_trial = data[occipital_electrodes, :tamanho_da_janela, freq, session]
-                    x_train.append(eeg_trial)
-                    labels_train.extend([frequencias[freq]])
-        x_train = np.array(x_train)
-
-        # Test data
-        data = all_data[test_user - 1]
-        for session in range(data.shape[3]):
-            for freq in indices:
-                eeg_trial = data[occipital_electrodes, :tamanho_da_janela, freq, session]
-                x_test.append(eeg_trial)
-                labels_test.extend([frequencias[freq]])
-        x_test = np.array(x_test)
+        x_train, x_test, labels_train, labels_test, channels_for_model = (
+            build_tensors_no_cca(
+                train_data,
+                test_data,
+                occipital_electrodes,
+                frequencias,
+                indices,
+                tamanho_da_janela,
+                apply_subband_filter=False,
+            )
+        )
 
         # Label mapping
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
-        labels_train = torch.tensor([mapeamento[rotulo.item()] for rotulo in labels_train])
-        labels_test = torch.tensor([mapeamento[rotulo.item()] for rotulo in labels_test])
+        labels_train = torch.tensor(
+            [
+                mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
+                for rotulo in labels_train
+            ]
+        )
+        labels_test = torch.tensor(
+            [
+                mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
+                for rotulo in labels_test
+            ]
+        )
 
         # Convert to tensors
         X_train = torch.from_numpy(x_train.copy()).float().to(device)
@@ -214,10 +232,12 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
 
         # Configure model and training
         model = EEGNet(
-            n_chans=9,
+            n_chans=channels_for_model,
             n_outputs=len(frequencias_desejadas),
             n_times=tamanho_da_janela,
-            kernel_length=(tamanho_da_janela // 2),
+            kernel_length=(sample_rate // 2),
+            F1=8,
+            drop_prob=0.25,
         )
         model = model.to(device)
 
@@ -237,7 +257,16 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             TensorDataset(X_test, Y_test), batch_size=10, shuffle=False
         )
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0001)
+        optimizer = optim.Adam(model.parameters(), lr=0.0009, weight_decay=6.8e-04)
+        # optimizer = optim.Adam(model.parameters(), lr=0.0001)
+
+        # Initialize early stopping
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=500,
+            verbose=True,
+            delta=0.0001
+        )
 
         # Train
         best_model = train(
@@ -249,6 +278,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             num_epochs=epochs,
             device=device,
             save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
+            early_stopping=early_stopping,
         )
 
         # Evaluate
@@ -261,7 +291,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
                 "acuracia": accuracy,
                 "recall": recall,
                 "f1-score": f1,
-                "confusion_matrix": cm,
+                # "confusion_matrix": cm,
             }
         )
 

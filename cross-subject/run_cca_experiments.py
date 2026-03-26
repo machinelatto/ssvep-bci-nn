@@ -54,10 +54,15 @@ num_harmonica = 3
 inform_fase = 0
 
 # Usuários
-users = list(range(1, 3))  # Usuários de 1 a 35
+users = list(range(1, 36))  # Usuários de 1 a 35
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-frequencias_desejadas = frequencias[:] # Todas as frequências
+frequencias_desejadas = frequencias[:8] # Todas as frequências
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
+
+# Optional CAR configuration on loaded data
+apply_car = True
+car_reference_channels = occipital_electrodes
+car_target_channels = occipital_electrodes
 
 print("Usuários de interesse:", users)
 print(f"Frequencies used: {frequencias_desejadas}")
@@ -68,6 +73,9 @@ all_data = load_data_from_users(
     users=users,
     visual_delay=delay,
     filter_bandpass=True,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
     freq_cut_low=freq_cut_low,
     freq_cut_high=freq_cut_high,
@@ -75,14 +83,14 @@ all_data = load_data_from_users(
 )
 
 # Parâmetros de janelas e sessões
-tamanho_da_janela_seg = [0.4, 0.6, 0.8, 1.0]  # em segundos
+tamanho_da_janela_seg = [1.0]  # em segundos
 
 for tamanho in tamanho_da_janela_seg:
     tamanho_da_janela = int(np.ceil(tamanho * sample_rate))
     print(f"Tamanho da janela: {tamanho_da_janela} samples ({tamanho} s)")
 
     exp_dir = Path(
-        f"CCA/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
+        f"35_8_optimized/CCA_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
     )
 
     # Cross-Subject EEGNet Training (single window per trial, no window separation)

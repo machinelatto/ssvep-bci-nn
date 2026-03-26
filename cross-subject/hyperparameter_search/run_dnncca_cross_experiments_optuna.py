@@ -12,76 +12,14 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-import scipy.io
-import torch.nn.functional as F
 import optuna
 from optuna.trial import Trial
 from optuna.samplers import TPESampler
 import sys
 sys.path.insert(0, str(Path.cwd().parent))
-from cross_subject_utils import (
-    evaluate,
-    get_windows,
-    load_data_from_users,
-    filter_signals_subbands,
-)
-from cca import CCA, reference_matrix
-
-
-class SSVEPDNN(nn.Module):
-    """SSVEP Deep Neural Network with subband processing."""
-    def __init__(self, num_classes=40, channels=9, samples=250, subbands=3):
-        super(SSVEPDNN, self).__init__()
-        # [batch, subbands, channels, time]
-        # Subband combination layer
-        self.subband_combination = nn.Conv2d(
-            subbands, 1, kernel_size=(1, 1), bias=False
-        )
-        # Channel combination layer
-        self.channel_combination = nn.Conv2d(1, 120, kernel_size=(channels, 1))
-        # First dropout
-        self.drop1 = nn.Dropout(0.1)
-        # Third layer - Time convolution
-        self.third_conv = nn.Conv2d(120, 120, kernel_size=(1, 2), stride=(1, 2))
-        # Second dropout
-        self.drop2 = nn.Dropout(0.1)
-        self.relu = nn.ReLU()
-        # 4th conv - FIR filtering
-        self.fourth_conv = nn.Conv2d(120, 120, kernel_size=(1, 10), padding="same")
-        self.drop3 = nn.Dropout(0.95)
-
-        # Fully connected layer - Classifier
-        self.fc = nn.Linear(120 * (samples // 2), num_classes)
-
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        with torch.no_grad():
-            self.subband_combination.weight.fill_(1.0)
-            for m in self.modules():
-                if isinstance(m, nn.Conv2d) and m != self.subband_combination:
-                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-                elif isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    nn.init.zeros_(m.bias)
-
-
-    def forward(self, x):
-        # x shape: [batch, subbands, channels, time]
-        x = self.subband_combination(x)  # [batch, 1, channels, time]
-        x = self.channel_combination(x)  # [batch, 120, 1, time]
-        x = self.drop1(x)
-        x = self.third_conv(x)  # [batch, 120, 1, time/2]
-        x = self.drop2(x)
-        x = self.relu(x)
-        x = self.fourth_conv(x)  # [batch, 120, 1, time/2]
-        x = self.drop3(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.fc(x)  # [batch, num_classes]
-        # output = F.softmax(x, dim=1)
-        return x
+from dnn import SSVEPDNN
+from benchmark_dataset import build_tensors_with_cca, load_freq_phase
+from cross_subject_utils import load_data_from_users
 
 
 def train(
@@ -211,7 +149,7 @@ def objective_per_user(
     # Create model
     model = SSVEPDNN(
         num_classes=40,
-        channels=40,
+        channels=X_train.shape[2],
         samples=tamanho_da_janela,
         subbands=3,
     )
@@ -311,10 +249,7 @@ np.random.seed(seed)
 print(f"Using device: {device}")
 
 # Load frequency and phase information
-freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
-freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase()
 
 # Preprocessing parameters
 sample_rate = 250
@@ -330,6 +265,11 @@ users = list(range(1, 36))  # 35 users for cross-subject
 frequencias_desejadas = frequencias[:]  # All 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
+# Optional CAR configuration on loaded data
+apply_car = False
+car_reference_channels = occipital_electrodes
+car_target_channels = None
+
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
@@ -341,6 +281,9 @@ all_data = load_data_from_users(
     users=users,
     visual_delay=delay,
     filter_bandpass=False,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
 )
 
@@ -378,98 +321,22 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             [all_data[users.index(u)] for u in train_users], axis=-1
         )  # shape: (channels, samples, freqs, trials)
 
-        num_canais, _, num_freqs, num_trials_train = train_data.shape
-
-        # Prepare reference matrices for all frequencies
-        Y_train = np.zeros(
-            (num_harmonica * 2, tamanho_da_janela * num_trials_train, len(indices))
+        dummy_test_data = train_data[:, :, :, :1]
+        tensor_treinamento, _, rotulos_treinamento, _, _ = build_tensors_with_cca(
+            train_data,
+            dummy_test_data,
+            occipital_electrodes,
+            frequencias,
+            fases,
+            indices,
+            num_harmonica,
+            inform_fase,
+            tamanho_da_janela,
+            mean_center=True,
+            apply_subband_filter=True,
+            subban_no=3,
+            sampling_rate=sample_rate,
         )
-        # Prepare CCA projection matrix
-        X_train = np.zeros(
-            (len(occipital_electrodes), tamanho_da_janela * num_trials_train, len(indices))
-        )
-
-        # Prepare training tensors
-        X_train_windows = np.zeros(
-            (num_trials_train * len(indices), len(occipital_electrodes), tamanho_da_janela)
-        )
-
-        # Prepare labels
-        labels_train = []
-
-        for k in range(len(indices)):
-            # Generate reference signals for this frequency
-            y_train = reference_matrix(
-                num_harmonica,
-                inform_fase,
-                num_trials_train,
-                frequencias[indices[k]],
-                fases,
-                tamanho_da_janela,
-            )
-            Y_train[:, :, k] = y_train
-
-            # Extract training data for this frequency
-            eeg_matrix_train_windows = train_data[
-                occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ] # shape: (num_channels, num_timepoints, num_trials)
-            # Flatten as trial-major blocks: [trial0 all time][trial1 all time]...
-            # so ordering matches reference_matrix tiling across sessions.
-            eeg_matrix_train = eeg_matrix_train_windows.transpose(0, 2, 1).reshape(
-                len(occipital_electrodes), -1
-            )
-            X_train[:, :, k] = eeg_matrix_train
-
-            # Add to window tensors (for later CCA projections and training)
-            X_train_windows[k * num_trials_train : (k + 1) * num_trials_train] = eeg_matrix_train_windows.transpose(2, 0, 1)
-
-            # Add labels
-            labels_train.extend([frequencias[indices[k]]] * num_trials_train)
-
-        # CCA optimization (across all training data)
-        Combinadores_Y = []
-        Combinadores_X = []
-        correlacoes_max = []
-        for k in range(len(indices)):
-            Wx, Wy, corr = CCA(X_train[:, :, k], Y_train[:, :, k])
-            Combinadores_Y.append(Wy)
-            Combinadores_X.append(Wx)
-            correlacoes_max.append(corr)
-        Combinadores_X = np.column_stack(Combinadores_X)
-        Combinadores_Y = np.column_stack(Combinadores_Y)
-
-        # Split into windows
-        X_treino_janelas = []
-        Y_treino_janelas = []
-
-        for k in range(len(indices)):
-            X_v, numero_janelas_treino = get_windows(
-                X_train[:, :, k], tamanho_da_janela, include_last=False
-            )
-            Y_v, _ = get_windows(Y_train[:, :, k], tamanho_da_janela, include_last=False)
-
-            X_treino_janelas.append(X_v)
-            Y_treino_janelas.append(Y_v)
-
-        # Build training tensor with CCA projections
-        rotulos_treinamento = []
-        tensor_treinamento = np.zeros(
-            [len(indices) * numero_janelas_treino, len(indices), tamanho_da_janela]
-        )
-        cont = 0
-
-        for m in range(len(indices)):
-            for j in range(numero_janelas_treino):
-                janela_x = X_treino_janelas[m][j]  # shape: (num_channels, num_timepoints)
-                rotulos_treinamento.append(frequencias[indices[m]])
-                cont_1 = 0
-                for w in range(len(indices)):
-                    Wx = Combinadores_X[:, w]
-                    janela_x = janela_x - np.mean(janela_x, axis=1, keepdims=True)
-                    projecao_x = np.dot(Wx, janela_x)  # (num_channels,) @ (num_channels, num_timepoints) = (num_timepoints,)
-                    tensor_treinamento[cont, cont_1, :] = projecao_x
-                    cont_1 += 1
-                cont += 1
 
         # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
@@ -478,11 +345,6 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
                 for rotulo in rotulos_treinamento
             ]
-        )
-
-        # Apply subband filtering to tensors
-        tensor_treinamento = filter_signals_subbands(
-            tensor_treinamento, subban_no=3, sampling_rate=250
         )
 
         X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32).to(device)

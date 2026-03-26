@@ -138,6 +138,11 @@ users = list(range(1, 36))  # 10 users for cross-subject
 frequencias_desejadas = frequencias[:]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
+# Optional CAR configuration on loaded data
+apply_car = False
+car_reference_channels = occipital_electrodes
+car_target_channels = None
+
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
@@ -149,6 +154,9 @@ all_data = load_data_from_users(
     users=users,
     visual_delay=delay,
     filter_bandpass=True,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
     freq_cut_low=freq_cut_low,
     freq_cut_high=freq_cut_high,

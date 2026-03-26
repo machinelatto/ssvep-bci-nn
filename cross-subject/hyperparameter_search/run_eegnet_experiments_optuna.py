@@ -7,42 +7,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-import scipy.io
 from braindecode.models import EEGNet
 import optuna
 from optuna.trial import Trial
 from optuna.samplers import TPESampler
 import sys
 sys.path.insert(0, str(Path.cwd().parent))
-from cross_subject_utils import (
-    evaluate,
-    load_data_from_users,
-)
-
-
-def extract_trials_trial_major(data, occipital_electrodes, indices, tamanho_da_janela, frequencias):
-    """Build trial tensor in deterministic session-major then frequency order.
-
-    Returns:
-        x: np.ndarray, shape (num_trials, num_channels, num_timepoints)
-        labels: list[float], frequency label per trial
-    """
-    x = []
-    labels = []
-    for session in range(data.shape[3]):
-        for freq in indices:
-            eeg_trial = np.ascontiguousarray(
-                data[occipital_electrodes, :tamanho_da_janela, freq, session]
-            )
-            x.append(eeg_trial)
-            labels.append(frequencias[freq])
-    return np.array(x), labels
+from benchmark_dataset import build_tensors_no_cca, load_freq_phase
+from cross_subject_utils import load_data_from_users
 
 
 def train(
@@ -156,10 +133,10 @@ def objective_per_user(
     Suggests hyperparameters and returns validation accuracy.
     """
     # Suggest hyperparameters
-    F1 = trial.suggest_categorical("F1", [4, 8, 16, 32, 64])
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
+    F1 = trial.suggest_categorical("F1", [4, 8])
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
-    drop_prob = trial.suggest_float("drop_prob", 0.0, 0.5)
+    drop_prob = trial.suggest_float("drop_prob", 0.0, 0.9)
     optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
 
@@ -179,7 +156,7 @@ def objective_per_user(
 
     # Create model with F1 parameter
     model = EEGNet(
-        n_chans=9,
+        n_chans=X_train.shape[1],
         n_outputs=len(frequencias_desejadas),
         n_times=tamanho_da_janela,
         kernel_length=(sample_rate // 2),
@@ -285,12 +262,7 @@ torch.manual_seed(seed)
 np.random.seed(seed)
 
 # Load frequency and phase information
-frequencias_e_fases = scipy.io.loadmat(
-    "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
-)
-frequencias = frequencias_e_fases["freqs"]
-frequencias = np.round(frequencias, 2).ravel()
-fases = frequencias_e_fases["phases"]
+frequencias, _ = load_freq_phase()
 
 # Preprocessing parameters
 filter_order = 10
@@ -305,6 +277,11 @@ users = list(range(1, 36))  # 35 users (full dataset)
 frequencias_desejadas = frequencias[:]  # All 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
+# Optional CAR configuration on loaded data
+apply_car = False
+car_reference_channels = occipital_electrodes
+car_target_channels = None
+
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
@@ -316,6 +293,9 @@ all_data = load_data_from_users(
     users=users,
     visual_delay=delay,
     filter_bandpass=True,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
     freq_cut_low=freq_cut_low,
     freq_cut_high=freq_cut_high,
@@ -335,7 +315,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"EEGNet_optuna_tuning/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
+        f"EEGNet_smaller_optuna_tuning/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -348,22 +328,19 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
         print(f"{'#'*80}")
         train_users = [u for u in users if u != test_user]
 
-        x_train = []
-        labels_train = []
-
-        # Train data (excluding test user)
-        for u in train_users:
-            data = all_data[u - 1]
-            user_x, user_labels = extract_trials_trial_major(
-                data,
-                occipital_electrodes,
-                indices,
-                tamanho_da_janela,
-                frequencias,
-            )
-            x_train.extend(user_x)
-            labels_train.extend(user_labels)
-        x_train = np.array(x_train)
+        train_data = np.concatenate(
+            [all_data[users.index(u)] for u in train_users], axis=-1
+        )
+        dummy_test_data = train_data[:, :, :, :1]
+        x_train, _, labels_train, _, _ = build_tensors_no_cca(
+            train_data,
+            dummy_test_data,
+            occipital_electrodes,
+            frequencias,
+            indices,
+            tamanho_da_janela,
+            apply_subband_filter=False,
+        )
 
         # Label mapping
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}

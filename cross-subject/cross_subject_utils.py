@@ -10,7 +10,112 @@ from sklearn.metrics import (
 )
 import torch
 from tqdm import tqdm
+import copy
 # import tqdm.notebook
+
+from benchmark_dataset import (
+    bandpass_filter as _bandpass_filter,
+    filter_signals_subbands as _filter_signals_subbands,
+    load_data_from_users as _load_data_from_users,
+)
+
+
+class EarlyStopping:
+    """Early stopping to avoid overfitting during training.
+    
+    Monitors a validation metric and stops training if no improvement is seen
+    for a specified number of epochs (patience).
+    
+    Args:
+        monitor (str): Metric to monitor. Options: 'val_loss', 'val_accuracy'. 
+                      Default: 'val_loss'
+        patience (int): Number of epochs with no improvement after which training 
+                       will be stopped. Default: 10
+        verbose (bool): If True, prints messages when early stopping is triggered 
+                       or best model is saved. Default: True
+        delta (float): Minimum change in monitored value to qualify as improvement. 
+                      Default: 0.0
+    """
+    
+    def __init__(self, monitor='val_loss', patience=10, verbose=True, delta=0.0):
+        self.monitor = monitor
+        self.patience = patience
+        self.verbose = verbose
+        self.delta = delta
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.best_model_state = None
+        self.best_epoch = 0
+        
+        # Determine if we're maximizing or minimizing the metric
+        if monitor == 'val_loss':
+            self.is_maximize = False
+        else:  # val_accuracy
+            self.is_maximize = True
+    
+    def __call__(self, model, current_value, epoch):
+        """Check if training should stop.
+        
+        Args:
+            model (nn.Module): PyTorch model to potentially save
+            current_value (float): Current value of the monitored metric
+            epoch (int): Current epoch number
+            
+        Returns:
+            bool: True if training should stop, False otherwise
+        """
+        if self.best_score is None:
+            self.best_score = current_value
+            self._save_checkpoint(model, epoch)
+        else:
+            if self._is_improvement(current_value):
+                self.best_score = current_value
+                self.counter = 0
+                self._save_checkpoint(model, epoch)
+            else:
+                self.counter += 1
+                if self.counter >= self.patience:
+                    self.early_stop = True
+                    if self.verbose:
+                        print(f"EarlyStopping: No improvement for {self.patience} epochs. Stopping training.")
+        
+        return self.early_stop
+    
+    def _is_improvement(self, current_value):
+        """Check if current value is an improvement over best score."""
+        if self.is_maximize:
+            return current_value > (self.best_score + self.delta)
+        else:
+            return current_value < (self.best_score - self.delta)
+    
+    def _save_checkpoint(self, model, epoch):
+        """Save model checkpoint."""
+        self.best_model_state = copy.deepcopy(model.state_dict())
+        self.best_epoch = epoch
+        if self.verbose:
+            metric_name = self.monitor.replace('_', ' ').title()
+            print(f"EarlyStopping: {metric_name} improved. Saving model at epoch {epoch + 1}.")
+    
+    def load_best_model(self, model):
+        """Load the best model state into the given model.
+        
+        Args:
+            model (nn.Module): PyTorch model to load weights into
+        """
+        if self.best_model_state is not None:
+            model.load_state_dict(self.best_model_state)
+            if self.verbose:
+                print(f"EarlyStopping: Loaded best model from epoch {self.best_epoch + 1}.")
+        return model
+    
+    def reset(self):
+        """Reset early stopping counters for a new training session."""
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.best_model_state = None
+        self.best_epoch = 0
 
 
 def plot_learning_curves(train_losses, val_losses, train_accuracies, val_accuracies):
@@ -43,50 +148,8 @@ def plot_learning_curves(train_losses, val_losses, train_accuracies, val_accurac
 
 
 def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
-    """Filter EEG signals and divide into sub-bands. High cutoff is fixed at 50 Hz. Low cutoff starts at 8 Hz and increases in steps of 8 Hz.
-
-    Args:
-        eeg_signals (np.ndarray): Input EEG signals of shape (samples, channels, time).
-        subban_no (int): Number of sub-bands to create.
-        sampling_rate (int): Sampling rate of the EEG signals.
-
-    Returns:
-        np.ndarray: Filtered EEG signals divided into sub-bands. Has shape (samples, subbands, channels, time).
-    """
-    samples, total_channels, sample_length = eeg_signals.shape
-    all_data = np.zeros((samples, subban_no, total_channels, sample_length))
-    print(f"All data shape before filtering: {eeg_signals.shape}")
-
-    # Bandpass filters
-    high_cutoff = [50] * subban_no
-    low_cutoff = [i for i in range(8, 8 * (subban_no + 1), 8)]
-    filter_order = 2
-    passband_ripple = 1
-    bp_filters = []
-
-    for i in range(subban_no):
-        b, a = scipy.signal.cheby1(
-            filter_order,
-            passband_ripple,
-            [low_cutoff[i], high_cutoff[i]],
-            btype="band",
-            fs=sampling_rate,
-        )
-        bp_filters.append((b, a))
-
-    # Filtering
-    for sample in range(samples):
-        tmp_raw = eeg_signals[sample]
-        for sub_band in range(subban_no):
-            processed_signal = np.zeros((total_channels, sample_length))
-            b, a = bp_filters[sub_band]
-
-            for ch_idx in range(total_channels):
-                processed_signal[ch_idx] = scipy.signal.filtfilt(b, a, tmp_raw[ch_idx])
-
-            all_data[sample, sub_band, :, :] = processed_signal
-    print(f"All data shape after filtering: {all_data.shape}")
-    return all_data
+    """Compatibility wrapper for benchmark_dataset.filter_signals_subbands."""
+    return _filter_signals_subbands(eeg_signals, subban_no, sampling_rate)
 
 
 def get_windows(eeg_matrix, window_size, include_last=False):
@@ -164,47 +227,52 @@ def evaluate(model, test_loader):
 def bandpass_filter(
     dados, taxa_amostragem, freq_corte_low, freq_corte_high, ordem_filtro
 ):
-    """
-    Filtra dados EEG utilizando um filtro Butterworth passa-banda.
-    Parâmetros:
-    dados (ndarray): Dados do EEG com formato (número de eletrodos, número de amostras, número de frequências, número de trials).
-    taxa_amostragem (int): Frequência de amostragem dos sinais EEG (Hz).
-    freq_corte_low (float): Frequência de corte inferior do filtro passa-banda (Hz).
-    freq_corte_high (float): Frequência de corte superior do filtro passa-banda (Hz).
-    ordem_filtro (int): Ordem do filtro Butterworth.
-
-    Retorna:
-    ndarray: Dados EEG filtrados.
-    """
-
-    # **Construção do filtro passa-banda**
-    # Cria o filtro passa-banda com os parâmetros especificados
-    b, a = scipy.signal.butter(
+    """Compatibility wrapper for benchmark_dataset.bandpass_filter."""
+    return _bandpass_filter(
+        dados,
+        taxa_amostragem,
+        freq_corte_low,
+        freq_corte_high,
         ordem_filtro,
-        [freq_corte_low, freq_corte_high],
-        btype="bandpass",
-        analog=False,
-        output="ba",
-        fs=taxa_amostragem,
     )
 
-    # **Filtragem dos dados**
-    # Realiza o processo de filtragem para todas as frequências, trials e eletrodos
-    num_eletrodos, num_amostras, num_freqs, num_trials = dados.shape
 
-    filtered_data = np.zeros_like(dados)
-    # Filtra os dados para cada frequência, trial e eletrodo
-    for f in range(num_freqs):  # Para cada frequência de estimulação
-        for trial in range(num_trials):  # Para cada trial
-            for eletrodo in range(num_eletrodos):  # Para cada eletrodo
-                # Filtra o sinal com o filtro de fase zero
-                eletrodo_filtrado = scipy.signal.filtfilt(
-                    b, a, dados[eletrodo, :, f, trial]
-                )
-                # Substitui o dado original pelo filtrado
-                filtered_data[eletrodo, :, f, trial] = eletrodo_filtrado
+def car_filter(eeg_matrix, reference_channels=None, target_channels=None):
+    """Apply CAR to a 2D EEG matrix with shape (channels, samples).
 
-    return filtered_data
+    Args:
+        eeg_matrix (np.ndarray): EEG array in (channels, samples) layout.
+        reference_channels (array-like, optional): Channels used to compute the
+            CAR reference. If None, all channels are used.
+        target_channels (array-like, optional): Channels where CAR is applied.
+            If None, CAR is applied to all channels.
+
+    Returns:
+        np.ndarray: CAR-referenced EEG matrix with same shape as input.
+    """
+    eeg_matrix = np.asarray(eeg_matrix)
+    if eeg_matrix.ndim != 2:
+        raise ValueError(
+            f"car_filter expects a 2D array (channels, samples), got shape {eeg_matrix.shape}"
+        )
+
+    num_channels = eeg_matrix.shape[0]
+
+    if reference_channels is None:
+        reference_channels = np.arange(num_channels)
+    reference_channels = np.asarray(reference_channels, dtype=int)
+
+    if target_channels is None:
+        target_channels = np.arange(num_channels)
+    target_channels = np.asarray(target_channels, dtype=int)
+
+    if reference_channels.size == 0:
+        raise ValueError("reference_channels cannot be empty")
+
+    reference = np.mean(eeg_matrix[reference_channels, :], axis=0, keepdims=False)
+    out = eeg_matrix.copy()
+    out[target_channels, :] = eeg_matrix[target_channels, :] - reference[np.newaxis, :]
+    return out
 
 
 def load_data_from_users(
@@ -212,19 +280,49 @@ def load_data_from_users(
     visual_delay=160,
     dataset_path="C:/Users/machi/Documents/Mestrado/repos/data/benchmark/",
     filter_bandpass=False,
+    apply_car=False,
+    car_reference_channels=None,
+    car_target_channels=None,
     sample_rate=250,
     freq_cut_low=6,
     freq_cut_high=70,
     filter_order=10,
 ):
-    all_data = []
-    for user in tqdm(users, desc="Carregando dados dos usuários"):
-        file_path = f"{dataset_path}/S{user}.mat"
-        data = scipy.io.loadmat(file_path)["data"]
-        if filter_bandpass:
-            data = bandpass_filter(
-                data, sample_rate, freq_cut_low, freq_cut_high, filter_order
-            )
-        data = data[:, (visual_delay) : (visual_delay + 1250), :, :]
-        all_data.append(data)
-    return all_data
+    """Compatibility wrapper for benchmark_dataset.load_data_from_users.
+
+    Optional preprocessing order:
+    1) Bandpass (if filter_bandpass=True)
+    2) CAR per (frequency, trial) slice (if apply_car=True)
+    """
+    data = _load_data_from_users(
+        users=users,
+        visual_delay=visual_delay,
+        dataset_path=dataset_path,
+        filter_bandpass=filter_bandpass,
+        sample_rate=sample_rate,
+        freq_cut_low=freq_cut_low,
+        freq_cut_high=freq_cut_high,
+        filter_order=filter_order,
+    )
+
+    if not apply_car:
+        return data
+
+    data_car = []
+    for user_data in data:
+        user_data_car = user_data.copy()
+        _, _, num_freqs, num_trials = user_data_car.shape
+
+        for freq_idx in range(num_freqs):
+            for trial_idx in range(num_trials):
+                user_data_car[:, :, freq_idx, trial_idx] = car_filter(
+                    user_data_car[:, :, freq_idx, trial_idx],
+                    reference_channels=car_reference_channels,
+                    target_channels=car_target_channels,
+                )
+
+        data_car.append(user_data_car)
+
+    return data_car
+
+

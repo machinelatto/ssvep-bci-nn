@@ -12,74 +12,14 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-import scipy.io
-import torch.nn.functional as F
 import optuna
 from optuna.trial import Trial
 from optuna.samplers import TPESampler
 import sys
 sys.path.insert(0, str(Path.cwd().parent))
-from cross_subject_utils import (
-    evaluate,
-    load_data_from_users,
-    filter_signals_subbands,
-)
-
-
-class SSVEPDNN(nn.Module):
-    """SSVEP Deep Neural Network with subband processing."""
-    def __init__(self, num_classes=40, channels=9, samples=250, subbands=3):
-        super(SSVEPDNN, self).__init__()
-        # [batch, subbands, channels, time]
-        # Subband combination layer
-        self.subband_combination = nn.Conv2d(
-            subbands, 1, kernel_size=(1, 1), bias=False
-        )
-        # Channel combination layer
-        self.channel_combination = nn.Conv2d(1, 120, kernel_size=(channels, 1))
-        # First dropout
-        self.drop1 = nn.Dropout(0.1)
-        # Third layer - Time convolution
-        self.third_conv = nn.Conv2d(120, 120, kernel_size=(1, 2), stride=(1, 2))
-        # Second dropout
-        self.drop2 = nn.Dropout(0.1)
-        self.relu = nn.ReLU()
-        # 4th conv - FIR filtering
-        self.fourth_conv = nn.Conv2d(120, 120, kernel_size=(1, 10), padding="same")
-        self.drop3 = nn.Dropout(0.95)
-
-        # Fully connected layer - Classifier
-        self.fc = nn.Linear(120 * (samples // 2), num_classes)
-
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        with torch.no_grad():
-            self.subband_combination.weight.fill_(1.0)
-            for m in self.modules():
-                if isinstance(m, nn.Conv2d) and m != self.subband_combination:
-                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    if m.bias is not None:
-                        nn.init.zeros_(m.bias)
-                elif isinstance(m, nn.Linear):
-                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    nn.init.zeros_(m.bias)
-
-
-    def forward(self, x):
-        # x shape: [batch, subbands, channels, time]
-        x = self.subband_combination(x)  # [batch, 1, channels, time]
-        x = self.channel_combination(x)  # [batch, 120, 1, time]
-        x = self.drop1(x)
-        x = self.third_conv(x)  # [batch, 120, 1, time/2]
-        x = self.drop2(x)
-        x = self.relu(x)
-        x = self.fourth_conv(x)  # [batch, 120, 1, time/2]
-        x = self.drop3(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.fc(x)  # [batch, num_classes]
-        # output = F.softmax(x, dim=1)
-        return x
+from dnn import SSVEPDNN
+from benchmark_dataset import build_tensors_no_cca, load_freq_phase
+from cross_subject_utils import load_data_from_users
 
 
 def train(
@@ -189,7 +129,6 @@ def objective_per_user(
     # Suggest hyperparameters
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
-    optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "SGD"])
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
 
     # Create dataset and loaders (fixed 80/20 split for tuning)
@@ -302,10 +241,7 @@ np.random.seed(seed)
 print(f"Using device: {device}")
 
 # Load frequency and phase information
-freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
-freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, _ = load_freq_phase()
 
 # Preprocessing parameters
 sample_rate = 250
@@ -316,6 +252,11 @@ occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
 frequencias_desejadas = frequencias[:]  # All 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
+
+# Optional CAR configuration on loaded data
+apply_car = False
+car_reference_channels = occipital_electrodes
+car_target_channels = None
 
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
@@ -328,6 +269,9 @@ all_data = load_data_from_users(
     users=users,
     visual_delay=delay,
     filter_bandpass=False,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
 )
 
@@ -358,21 +302,21 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         print(f"{'#'*80}")
         train_users = [u for u in users if u != test_user]
 
-        x_train = []
-        labels_train = []
-
-        # Train users (excluding test user)
-        for u in train_users:
-            data = all_data[u - 1]
-            for session in range(data.shape[3]):
-                for freq in range(len(indices)):
-                    eeg_trial = data[occipital_electrodes, :, indices[freq], session]
-                    eeg_trial = eeg_trial[:, :tamanho_da_janela]
-                    x_train.append(eeg_trial)
-                    labels_train.extend([frequencias[freq]])
-        x_train = np.array(x_train)
-        # Apply subband filtering: [batch, subbands, channels, time]
-        x_train = filter_signals_subbands(x_train, subban_no=3, sampling_rate=250)
+        train_data = np.concatenate(
+            [all_data[users.index(u)] for u in train_users], axis=-1
+        )
+        dummy_test_data = train_data[:, :, :, :1]
+        x_train, _, labels_train, _, _ = build_tensors_no_cca(
+            train_data,
+            dummy_test_data,
+            occipital_electrodes,
+            frequencias,
+            indices,
+            tamanho_da_janela,
+            apply_subband_filter=True,
+            subban_no=3,
+            sampling_rate=sample_rate,
+        )
 
         # Label mapping
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}

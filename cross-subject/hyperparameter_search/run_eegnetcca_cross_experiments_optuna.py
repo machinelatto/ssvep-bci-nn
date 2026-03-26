@@ -12,17 +12,14 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-import scipy.io
 from braindecode.models import EEGNet
 import optuna
 from optuna.trial import Trial
 from optuna.samplers import TPESampler
 import sys
 sys.path.insert(0, str(Path.cwd().parent))
-from cross_subject_utils import (
-    load_data_from_users,
-)
-from cca import CCA, reference_matrix
+from benchmark_dataset import build_tensors_with_cca, load_freq_phase
+from cross_subject_utils import load_data_from_users
 
 
 def train(
@@ -132,11 +129,11 @@ def objective_per_user(
     Suggests hyperparameters and returns validation accuracy.
     """
     # Suggest hyperparameters
-    F1 = trial.suggest_categorical("F1", [4, 8, 16, 32, 64])
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-2, log=True)
+    F1 = trial.suggest_categorical("F1", [4, 8])
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256])
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-    drop_prob = trial.suggest_float("drop_prob", 0.0, 0.5)
+    drop_prob = trial.suggest_float("drop_prob", 0.0, 0.9)
 
     # Create dataset and loaders (fixed 80/20 split for tuning)
     dataset = TensorDataset(X_treino, Y_treino)
@@ -253,10 +250,7 @@ np.random.seed(seed)
 print(f"Using device: {device}")
 
 # Load frequency and phase information
-freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
-freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase()
 
 # Preprocessing parameters
 sample_rate = 250
@@ -275,6 +269,11 @@ users = list(range(1, 36))  # 35 users for cross-subject
 frequencias_desejadas = frequencias[:]  # All 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
+# Optional CAR configuration on loaded data
+apply_car = False
+car_reference_channels = occipital_electrodes
+car_target_channels = None
+
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
@@ -286,6 +285,9 @@ all_data = load_data_from_users(
     users=users,
     visual_delay=delay,
     filter_bandpass=True,
+    apply_car=apply_car,
+    car_reference_channels=car_reference_channels,
+    car_target_channels=car_target_channels,
     sample_rate=sample_rate,
     freq_cut_low=freq_cut_low,
     freq_cut_high=freq_cut_high,
@@ -307,7 +309,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"CCA_eegnet_optuna/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"CCA_eegnet_smaller_optuna/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -325,85 +327,27 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         train_data = np.concatenate(
             [all_data[users.index(u)] for u in train_users], axis=-1
         )  # shape: (channels, samples, freqs, trials)
-        test_data = all_data[test_user_idx]
 
-        num_canais, _, num_freqs, num_trials_train = train_data.shape
-        num_trials_test = test_data.shape[-1]
-
-        # Prepare reference matrices for all frequencies
-        Y_train = np.zeros(
-            (num_harmonica * 2, tamanho_da_janela * num_trials_train, len(indices))
+        dummy_test_data = train_data[:, :, :, :1]
+        tensor_treinamento, _, rotulos_treinamento, _, _ = build_tensors_with_cca(
+            train_data,
+            dummy_test_data,
+            occipital_electrodes,
+            frequencias,
+            fases,
+            indices,
+            num_harmonica,
+            inform_fase,
+            tamanho_da_janela,
+            mean_center=True,
+            apply_subband_filter=False,
         )
-        # Prepare CCA projection matrix
-        X_train = np.zeros(
-            (len(occipital_electrodes), tamanho_da_janela * num_trials_train, len(indices))
-        )
-
-        # Prepare training and test tensors
-        X_train_windows = np.zeros(
-            (num_trials_train * len(indices), len(occipital_electrodes), tamanho_da_janela)
-        )
-
-        # Prepare labels
-        labels_train = []
-
-        for k in range(len(indices)):
-            # Generate reference signals for this frequency
-            y_train = reference_matrix(
-                num_harmonica,
-                inform_fase,
-                num_trials_train,
-                frequencias[indices[k]],
-                fases,
-                tamanho_da_janela,
-            )
-            Y_train[:, :, k] = y_train
-
-            # Extract training data for this frequency
-            eeg_matrix_train_windows = train_data[
-                occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ] # shape: (num_channels, num_timepoints, num_trials)
-            # Flatten as trial-major blocks: [trial0 all time][trial1 all time]...
-            # so ordering matches reference_matrix tiling across sessions.
-            eeg_matrix_train = eeg_matrix_train_windows.transpose(0, 2, 1).reshape(
-                len(occipital_electrodes), -1
-            )
-            X_train[:, :, k] = eeg_matrix_train
-            # Add to window tensors (for later CCA projections and training)
-            X_train_windows[k * num_trials_train : (k + 1) * num_trials_train] = eeg_matrix_train_windows.transpose(2, 0, 1)
-            # Add labels
-            labels_train.extend([frequencias[indices[k]]] * num_trials_train)
-
-        # CCA optimization (across all training data)
-        Combinadores_Y = []
-        Combinadores_X = []
-        correlacoes_max = []
-        for k in range(len(indices)):
-            Wx, Wy, corr = CCA(X_train[:, :, k], Y_train[:, :, k])
-            Combinadores_Y.append(Wy)
-            Combinadores_X.append(Wx)
-            correlacoes_max.append(corr)
-        Combinadores_X = np.column_stack(Combinadores_X)
-        Combinadores_Y = np.column_stack(Combinadores_Y)
-
-        tensor_treinamento = np.zeros(
-            [len(indices) * num_trials_train, len(indices), tamanho_da_janela]
-        )
-        for j in range(num_trials_train):
-            for k in range(len(indices)):
-                janela_x = X_train_windows[k * num_trials_train + j]  # shape: (num_channels, num_timepoints)
-                janela_x = janela_x - np.mean(janela_x, axis=1, keepdims=True)
-                # Apply ALL CCA components
-                for freq_idx in range(len(indices)):
-                    Wx = Combinadores_X[:, freq_idx]
-                    projecao_x = np.dot(Wx, janela_x)  # (num_channels,) @ (num_channels, num_timepoints) = (num_timepoints,)
-                    tensor_treinamento[k * num_trials_train + j, freq_idx, :] = projecao_x
         # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
         rotulos_treinamento = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
-                for rotulo in labels_train
+                for rotulo in rotulos_treinamento
             ]
         )
 
