@@ -16,11 +16,10 @@ import scipy.io
 
 from cross_subject_utils import (
     evaluate,
-    get_windows,
     load_data_from_users,
-    filter_signals_subbands,
+    EarlyStopping,
 )
-from cca import CCA, reference_matrix
+from benchmark_dataset import build_tensors_with_fbcca
 from dnn import SSVEPDNN
 
 
@@ -33,8 +32,9 @@ def train(
     num_epochs=100,
     device=0,
     save_path="best_model.pth",
+    early_stopping=None,
 ):
-    """Train the model with early stopping based on validation accuracy."""
+    """Train the model with optional early stopping based on validation metrics."""
     best_val_accuracy = -float("inf")
     model.to(device)
     train_losses, val_losses = [], []
@@ -102,8 +102,20 @@ def train(
                 f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
                 f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}"
             )
+        
+        # Early stopping check if provided
+        if early_stopping is not None:
+            if early_stopping(model, avg_val_loss, epoch):
+                print(f"Early stopping triggered at epoch {epoch + 1}")
+                break
     
-    model.load_state_dict(best_model)
+    # Load best model
+    if early_stopping is not None:
+        model = early_stopping.load_best_model(model)
+        torch.save(model.state_dict(), save_path)
+    else:
+        model.load_state_dict(best_model)
+        
     return model
 
 
@@ -127,19 +139,19 @@ sample_rate = 250
 delay = 160
 
 # CCA parameters
-num_harmonica = 5
+num_harmonica = 3
 inform_fase = 0
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 36))  # 10 users for cross-subject
+users = list(range(1, 36))  # 35 users for cross-subject
 frequencias_desejadas = frequencias[:8]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
-apply_car = False
+apply_car = True
 car_reference_channels = occipital_electrodes
-car_target_channels = None
+car_target_channels = occipital_electrodes
 
 print("Users of interest:", users)
 print("Frequencies of interest:", frequencias_desejadas)
@@ -159,7 +171,7 @@ all_data = load_data_from_users(
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg_list = [0.4, 0.6, 0.8, 1.0]
+tamanho_da_janela_seg_list = [1.0]
 
 # Training parameters
 epochs = 1000
@@ -172,7 +184,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"CCA_dnn_8_10/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"35_8_optimized/FBCCA_DNN/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -190,171 +202,35 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         )  # shape: (channels, samples, freqs, trials)
         test_data = all_data[test_user_idx]
 
-        num_canais, _, num_freqs, num_trials_train = train_data.shape
-        num_trials_test = test_data.shape[-1]
-
-        # Prepare reference matrices for all frequencies (no window separation)
-        Y_train = np.zeros(
-            (tamanho_da_janela * num_trials_train, num_harmonica * 2, len(indices))
-        )
-        Y_test = np.zeros(
-            (tamanho_da_janela * num_trials_test, num_harmonica * 2, len(indices))
-        )
-        for k in indices:
-            y_train = reference_matrix(
+        tensor_treinamento, tensor_teste, labels_train, labels_test, channels_for_model = (
+            build_tensors_with_fbcca(
+                train_data,
+                test_data,
+                occipital_electrodes,
+                frequencias,
+                fases,
+                indices,
                 num_harmonica,
                 inform_fase,
-                num_trials_train,
-                frequencias[k],
-                fases,
                 tamanho_da_janela,
-            )
-            Y_train[:, :, k] = y_train
-            y_test = reference_matrix(
-                num_harmonica,
-                inform_fase,
-                num_trials_test,
-                frequencias[k],
-                fases,
-                tamanho_da_janela,
-            )
-            Y_test[:, :, k] = y_test
-
-        # Extract EEG data for each frequency (before subband filtering)
-        X_train = np.zeros(
-            (
-                tamanho_da_janela * num_trials_train,
-                3,
-                len(occipital_electrodes),
-                len(indices),
+                mean_center=True,
+                subban_no=3,
+                sampling_rate=sample_rate,
             )
         )
-        X_test = np.zeros(
-            (
-                tamanho_da_janela * num_trials_test,
-                3,
-                len(occipital_electrodes),
-                len(indices),
-            )
-        )
-
-        for k in range(len(indices)):
-            # For training: each trial is a single window
-            eeg_matrix_train = train_data[
-                occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ].reshape(-1, len(occipital_electrodes), tamanho_da_janela)
-            eeg_matrix_train = filter_signals_subbands(
-                eeg_matrix_train, subban_no=3, sampling_rate=250
-            )
-            eeg_matrix_test = test_data[
-                occipital_electrodes, :tamanho_da_janela, indices[k], :
-            ].reshape(-1, len(occipital_electrodes), tamanho_da_janela)
-            eeg_matrix_test = filter_signals_subbands(
-                eeg_matrix_test, subban_no=3, sampling_rate=250
-            )
-
-            eeg_matrix_train = np.moveaxis(eeg_matrix_train, -1, 0)
-            eeg_matrix_test = np.moveaxis(eeg_matrix_test, -1, 0)
-            eeg_matrix_train = np.concatenate(eeg_matrix_train, axis=0)
-            eeg_matrix_test = np.concatenate(eeg_matrix_test, axis=0)
-
-            X_train[:, :, :, k] = eeg_matrix_train
-            X_test[:, :, :, k] = eeg_matrix_test
-
-        # CCA optimization (across all training data, per subband)
-        Combinadores_Y = []
-        Combinadores_X = []
-        for i in range(1):
-            Combinadores_Y_sub = []
-            Combinadores_X_sub = []
-            for k in range(len(indices)):
-                Wx, Wy, _ = CCA(X_train[:, i, :, k], Y_train[:, :, k])
-                Combinadores_Y_sub.append(Wy)
-                Combinadores_X_sub.append(Wx)
-            Combinadores_X.append(np.column_stack(Combinadores_X_sub))
-            Combinadores_Y.append(np.column_stack(Combinadores_Y_sub))
-        Combinadores_X = np.array(Combinadores_X)  # shape: (3, len(indices), channels)
-        Combinadores_Y = np.array(Combinadores_Y)  # shape: (3, len(indices), 2*num_harmonica)
-
-        # Split into windows
-        X_teste_janelas = []
-        X_treino_janelas = []
-        Y_teste_janelas = []
-        Y_treino_janelas = []
-
-        for k in range(len(indices)):
-            X_t, numero_janelas_teste = get_windows(
-                X_test[:, :, :, k], tamanho_da_janela, include_last=False
-            )
-            Y_t, _ = get_windows(Y_test[:, :, k], tamanho_da_janela, include_last=False)
-
-            X_v, numero_janelas_treino = get_windows(
-                X_train[:, :, :, k], tamanho_da_janela, include_last=False
-            )
-            Y_v, _ = get_windows(Y_train[:, :, k], tamanho_da_janela, include_last=False)
-
-            X_teste_janelas.append(X_t)
-            Y_teste_janelas.append(Y_t)
-
-            X_treino_janelas.append(X_v)
-            Y_treino_janelas.append(Y_v)
-
-        # Build training tensor with CCA projections
-        rotulos_treinamento = []
-        tensor_treinamento = np.zeros(
-            [len(indices) * numero_janelas_treino, 3, len(indices), tamanho_da_janela]
-        )
-        cont = 0
-
-        for m in range(len(indices)):
-            for j in range(numero_janelas_treino):
-                rotulos_treinamento.append(frequencias[indices[m]])
-                cont_1 = 0
-                for w in range(len(indices)):
-                    for subband in range(3):
-                        Wx = Combinadores_X[subband, :, w]
-                        janela_x = X_treino_janelas[m][j][:, subband, :]
-                        janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
-                        projecao_x = np.dot(Wx, janela_x.T)
-                        tensor_treinamento[cont, subband, cont_1, :] = projecao_x
-
-                    cont_1 += 1
-                cont += 1
-
-        # Build test tensor with CCA projections
-        rotulos_teste = []
-        tensor_teste = np.zeros(
-            [len(indices) * numero_janelas_teste, 3, len(indices), tamanho_da_janela]
-        )
-        cont = 0
-
-        for m in range(len(indices)):
-            for j in range(numero_janelas_teste):
-                rotulos_teste.append(frequencias[indices[m]])
-                cont_1 = 0
-                for w in range(len(indices)):
-                    for subband in range(3):
-                        Wx = Combinadores_X[subband, :, w]
-                        janela_x = X_teste_janelas[m][j][:, subband, :]
-                        janela_x = janela_x - np.mean(janela_x, axis=0, keepdims=True)
-                        projecao_x = np.dot(Wx, janela_x.T)
-                        tensor_teste[cont, subband, cont_1, :] = projecao_x
-
-                    cont_1 += 1
-                cont += 1
 
         # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
         rotulos_treinamento = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
-                for rotulo in rotulos_treinamento
+                for rotulo in labels_train
             ]
         )
         rotulos_teste = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
-                for rotulo in rotulos_teste
+                for rotulo in labels_test
             ]
         )
 
@@ -368,16 +244,27 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         print(f"Y_train: {Y_treino.shape}")
         print(f"Y_test: {Y_teste.shape}")
 
+        # Initialize early stopping
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=500,
+            verbose=True,
+            delta=0.0001
+        )
+
         # Model setup
         model = SSVEPDNN(
             num_classes=len(frequencias_desejadas),
-            channels=len(indices),
+            channels=channels_for_model,
             samples=tamanho_da_janela,
             subbands=3,
+            first_dropout=0.5,
+            second_dropout=0.5,
+            third_dropout=0.95,
         )
         model = model.to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0001)
+        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
 
         dataset = TensorDataset(X_treino, Y_treino)
         train_size = int(0.85 * len(dataset))
@@ -402,6 +289,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             num_epochs=epochs,
             device=device,
             save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
+            early_stopping=early_stopping,
         )
 
         # Evaluate
@@ -413,7 +301,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 "acuracia": accuracy,
                 "recall": recall,
                 "f1-score": f1,
-                "confusion_matrix": cm,
+                # "confusion_matrix": cm,
             }
         )
         print(
