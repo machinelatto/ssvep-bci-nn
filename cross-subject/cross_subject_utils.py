@@ -201,10 +201,13 @@ def get_windows(eeg_matrix, window_size, include_last=False):
 
 def evaluate(model, test_loader):
     model.eval()
+    model_device = next(model.parameters()).device
     all_preds = []
     all_labels = []
     with torch.inference_mode():
         for inputs, labels in test_loader:
+            inputs = inputs.to(model_device)
+            labels = labels.to(model_device)
             outputs = model(inputs)
             _, preds = torch.max(outputs, 1)
             all_preds.extend(preds.cpu().numpy())

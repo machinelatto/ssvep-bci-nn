@@ -39,9 +39,9 @@ def CCA(X: np.ndarray, Y: np.ndarray):
     )
 
     # Autocovariância de X
-    Cxx = S[:colunas_X, :colunas_X]
+    Cxx = S[:colunas_X, :colunas_X] + 1e-6 * np.eye(colunas_X)
     # Autocovariância de Y
-    Cyy = S[colunas_X:, colunas_X:]
+    Cyy = S[colunas_X:, colunas_X:] + 1e-6 * np.eye(S.shape[0] - colunas_X)
     # Covariância entre X e Y
     Cxy = S[:colunas_X, colunas_X:]
 
