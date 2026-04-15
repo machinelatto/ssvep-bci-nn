@@ -55,8 +55,9 @@ inform_fase = 0
 
 # Usuários
 users = list(range(1, 36))  # Usuários de 1 a 35
+users_to_run = users.copy()  # Ex.: [1, 5, 10]
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-frequencias_desejadas = frequencias[:8] # Todas as frequências
+frequencias_desejadas = frequencias[:] # Todas as frequências
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -65,6 +66,7 @@ car_reference_channels = occipital_electrodes
 car_target_channels = occipital_electrodes
 
 print("Usuários de interesse:", users)
+print("Usuários para executar:", users_to_run)
 print(f"Frequencies used: {frequencias_desejadas}")
 print(f"Frequencies indices: {indices}")
 
@@ -90,7 +92,7 @@ for tamanho in tamanho_da_janela_seg:
     print(f"Tamanho da janela: {tamanho_da_janela} samples ({tamanho} s)")
 
     exp_dir = Path(
-        f"35_8_optimized/CCA_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
+        f"35_40_optimized/CCA_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
     )
 
     # Cross-Subject EEGNet Training (single window per trial, no window separation)
@@ -98,10 +100,10 @@ for tamanho in tamanho_da_janela_seg:
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     # Prepare cross-subject splits
-    for test_user_idx, test_user in enumerate(users):
+    for test_user in users_to_run:
         print(f"Processando Usuário {test_user}")
 
-        test_data = all_data[test_user_idx]
+        test_data = all_data[users.index(test_user)]
         num_trials_test = test_data.shape[-1]
 
         Y_test = np.zeros((num_harmonica * 2, tamanho_da_janela, len(indices)))
@@ -141,16 +143,21 @@ for tamanho in tamanho_da_janela_seg:
                 "acuracia": accuracy,
                 "recall": recall,
                 "f1-score": f1,
-                "confusion_matrix": cm,
+                # "confusion_matrix": cm,
             }
         )
         print(
             f"Test User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
 
-        # Salvar as métricas de cada usuário
-        df_metricas = pd.DataFrame(metricas_usuarios)
-        df_metricas.to_csv(exp_dir.joinpath("metricas.csv"), index=False)
+        # Salvar as métricas de cada usuário (append para permitir retomada)
+        metrics_path = exp_dir.joinpath("metricas.csv")
+        pd.DataFrame([metricas_usuarios[-1]]).to_csv(
+            metrics_path,
+            mode="a",
+            header=not metrics_path.exists(),
+            index=False,
+        )
 
         print("-" * 50)
 
