@@ -97,7 +97,7 @@ def train(
 
         # Early stopping check (if provided)
         if early_stopping is not None:
-            if early_stopping(model, val_loss, epoch):
+            if early_stopping(model, val_accuracy, epoch):
                 print(f"Early stopping triggered at epoch {epoch + 1}")
                 break
         else:
@@ -134,7 +134,8 @@ delay = 160
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
-frequencias_desejadas = frequencias[:8]  # 8 frequencies
+users_to_run = users.copy()  # Ex.: [1, 5, 10]
+frequencias_desejadas = frequencias[:]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -143,6 +144,7 @@ car_reference_channels = occipital_electrodes
 car_target_channels = occipital_electrodes
 
 print("Users of interest:", users)
+print("Users to run:", users_to_run)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
 
@@ -180,14 +182,14 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     metricas_usuarios = []
 
     # Leave-one-user-out cross-validation
-    for test_user_idx, test_user in enumerate(users):
+    for test_user in users_to_run:
         print(f"\nProcessing User {test_user}")
         train_users = [u for u in users if u != test_user]
 
         train_data = np.concatenate(
             [all_data[users.index(u)] for u in train_users], axis=-1
         )
-        test_data = all_data[test_user_idx]
+        test_data = all_data[users.index(test_user)]
 
         x_train, x_test, labels_train, labels_test, channels_for_model = (
             build_tensors_no_cca(
@@ -222,7 +224,6 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         X_test = torch.from_numpy(x_test.copy()).float().to(device)
         Y_train = labels_train.to(torch.long).to(device)
         Y_test = labels_test.to(torch.long).to(device)
-
         print(f"X_train: {X_train.shape}")
         print(f"X_test: {X_test.shape}")
         print(f"Y_train: {Y_train.shape}")
@@ -248,10 +249,20 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             generator=torch.Generator().manual_seed(seed),
         )
 
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=64,
+            shuffle=True,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=16,
+            shuffle=False,
+        )
         test_loader = DataLoader(
-            TensorDataset(X_test, Y_test), batch_size=10, shuffle=False
+            TensorDataset(X_test, Y_test),
+            batch_size=10,
+            shuffle=False,
         )
 
         criterion = nn.CrossEntropyLoss()
@@ -259,7 +270,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         # Initialize early stopping
         early_stopping = EarlyStopping(
-            monitor='val_loss',
+            monitor='val_accuracy',
             patience=500,
             verbose=False,
             delta=0.0001
@@ -295,9 +306,14 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
 
-        # Save metrics
-        df_metricas = pd.DataFrame(metricas_usuarios)
-        df_metricas.to_csv(exp_dir.joinpath("metricas.csv"), index=False)
+        # Save metrics (append to support restarting failed runs)
+        metrics_path = exp_dir.joinpath("metricas.csv")
+        pd.DataFrame([metricas_usuarios[-1]]).to_csv(
+            metrics_path,
+            mode="a",
+            header=not metrics_path.exists(),
+            index=False,
+        )
 
         print("-" * 50)
 
