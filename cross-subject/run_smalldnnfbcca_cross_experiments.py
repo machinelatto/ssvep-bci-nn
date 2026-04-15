@@ -1,26 +1,26 @@
 """
-Run EEGNet cross-subject experiments with full dataset (35 users, 40 frequencies)
-for all time lengths.
+Run SmallDNN+FBCCA cross-subject experiments with all time windows.
+Uses CCA optimization per subband and subband-specific filtering.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
-from braindecode.models import EEGNet
+import scipy.io
 
 from cross_subject_utils import (
     evaluate,
-    EarlyStopping,
     load_data_from_users,
+    EarlyStopping,
 )
-from benchmark_dataset import build_tensors_no_cca, load_freq_phase
+from benchmark_dataset import build_tensors_with_fbcca
+from smalldnn import SMALLDNN
 
 
 def train(
@@ -35,10 +35,11 @@ def train(
     early_stopping=None,
 ):
     """Train the model with optional early stopping based on validation metrics."""
+    best_val_accuracy = -float("inf")
     model.to(device)
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
-
+    
     for epoch in tqdm(range(num_epochs)):
         # Training Phase
         model.train()
@@ -88,30 +89,32 @@ def train(
         train_accuracies.append(train_accuracy)
         val_accuracies.append(val_accuracy)
 
+        # Save if best val acc
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            best_model = copy.deepcopy(model.state_dict())
+            torch.save(model.state_dict(), save_path)
+
+        # Print progress (less verbose for scripts)
         if (epoch + 1) % 50 == 0:
             print(
                 f"Epoch {epoch + 1}/{num_epochs}: "
-                f"Train Loss: {avg_train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, "
-                f"Val Loss: {avg_val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
+                f"Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
+                f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}"
             )
 
-        # Early stopping check (if provided)
+        # Early stopping check if provided
         if early_stopping is not None:
             if early_stopping(model, val_accuracy, epoch):
                 print(f"Early stopping triggered at epoch {epoch + 1}")
                 break
-        else:
-            # Fallback: save best model if no early stopping
-            if epoch == 0 or val_accuracy > max(val_accuracies[:-1]):
-                torch.save(model.state_dict(), save_path)
-
-    # Load best model (either from early stopping or training)
+    # Load best model
     if early_stopping is not None:
         model = early_stopping.load_best_model(model)
         # torch.save(model.state_dict(), save_path)
     else:
-        model.load_state_dict(torch.load(save_path))
-    
+        model.load_state_dict(best_model)
+
     return model
 
 
@@ -122,21 +125,27 @@ torch.cuda.manual_seed(seed)
 torch.manual_seed(seed)
 np.random.seed(seed)
 
+print(f"Using device: {device}")
+
 # Load frequency and phase information
-frequencias, _ = load_freq_phase()
+freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
+freq_phase = scipy.io.loadmat(freq_phase_path)
+frequencias = np.round(freq_phase["freqs"], 2).ravel()
+fases = freq_phase["phases"]
 
 # Preprocessing parameters
-filter_order = 10
-freq_cut_high = 50
-freq_cut_low = 6
 sample_rate = 250
 delay = 160
 
+# CCA parameters
+num_harmonica = 3
+inform_fase = 0
+
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 36))  # 35 users (full dataset)
+users = list(range(1, 36))  # 35 users for cross-subject
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
-frequencias_desejadas = frequencias[:]  # First 8 frequencies
+frequencias_desejadas = frequencias[:]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -152,106 +161,116 @@ print("Indices of frequencies of interest:", indices)
 # Load all data
 print("\nLoading data from all users...")
 all_data = load_data_from_users(
-    users=users,
     dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
+    users=users,
     visual_delay=delay,
-    filter_bandpass=True,
+    filter_bandpass=False,
     apply_car=apply_car,
     car_reference_channels=car_reference_channels,
     car_target_channels=car_target_channels,
     sample_rate=sample_rate,
-    freq_cut_low=freq_cut_low,
-    freq_cut_high=freq_cut_high,
-    filter_order=filter_order,
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg = [1.0]
+tamanho_da_janela_seg_list = [1.0]
 
 # Training parameters
 epochs = 1000
 
-for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
-    tamanho_da_janela = int(np.ceil(tamanho_da_janela_seg_val * sample_rate))
+# Experiment loop for each time window
+for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
+    tamanho_da_janela = int(np.ceil(tamanho_da_janela_seg * sample_rate))
     print(f"\n{'='*100}")
-    print(f"Window size: {tamanho_da_janela} samples ({tamanho_da_janela_seg_val} s)")
+    print(f"Window size: {tamanho_da_janela} samples ({tamanho_da_janela_seg} s)")
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"35_40_optimized/EEGNET_8_2_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
+        f"35_8_optimized/FBCCA_SMALLDNN/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
-    metrics = []
+    metricas_usuarios = []
 
     # Leave-one-user-out cross-validation
     for test_user in users_to_run:
         print(f"\nProcessing User {test_user}")
         train_users = [u for u in users if u != test_user]
+        print(f"Train Users: {train_users}")
 
+        # Concatenate training data from all train_users
         train_data = np.concatenate(
             [all_data[users.index(u)] for u in train_users], axis=-1
-        )
+        )  # shape: (channels, samples, freqs, trials)
         test_data = all_data[users.index(test_user)]
 
-        x_train, x_test, labels_train, labels_test, channels_for_model = (
-            build_tensors_no_cca(
+        tensor_treinamento, tensor_teste, labels_train, labels_test, channels_for_model = (
+            build_tensors_with_fbcca(
                 train_data,
                 test_data,
                 occipital_electrodes,
                 frequencias,
+                fases,
                 indices,
+                num_harmonica,
+                inform_fase,
                 tamanho_da_janela,
-                apply_subband_filter=False,
+                mean_center=True,
+                subban_no=3,
+                sampling_rate=sample_rate,
             )
         )
 
-        # Label mapping
+        # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
-        labels_train = torch.tensor(
+        rotulos_treinamento = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
                 for rotulo in labels_train
             ]
         )
-        labels_test = torch.tensor(
+        rotulos_teste = torch.tensor(
             [
                 mapeamento[rotulo.item()] if hasattr(rotulo, "item") else mapeamento[rotulo]
                 for rotulo in labels_test
             ]
         )
 
-        # Convert to tensors
-        X_train = torch.from_numpy(x_train.copy()).float().to(device)
-        X_test = torch.from_numpy(x_test.copy()).float().to(device)
-        Y_train = labels_train.to(torch.long).to(device)
-        Y_test = labels_test.to(torch.long).to(device)
-        print(f"X_train: {X_train.shape}")
-        print(f"X_test: {X_test.shape}")
-        print(f"Y_train: {Y_train.shape}")
-        print(f"Y_test: {Y_test.shape}")
+        X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32).to(device)
+        X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
+        Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long).to(device)
+        Y_teste = torch.tensor(rotulos_teste, dtype=torch.long).to(device)
+        print(f"X_train: {X_treino.shape}")
+        print(f"X_test: {X_teste.shape}")
+        print(f"Y_train: {Y_treino.shape}")
+        print(f"Y_test: {Y_teste.shape}")
 
-        # Configure model and training
-        model = EEGNet(
-            n_chans=channels_for_model,
-            n_outputs=len(frequencias_desejadas),
-            n_times=tamanho_da_janela,
-            kernel_length=(sample_rate // 2),
-            F1=8,
-            drop_prob=0.25,
+        # Initialize early stopping
+        early_stopping = EarlyStopping(
+            monitor='val_accuracy',
+            patience=500,
+            verbose=True,
+            delta=0.0001
+        )
+
+        # Model setup
+        model = SMALLDNN(
+            num_classes=len(frequencias_desejadas),
+            channels=channels_for_model,
+            samples=tamanho_da_janela,
+            subbands=3,
+            n_filters=120,   # Typical best hyperparameters for SMALLDNN
+            dropout_rate=0.5,
         )
         model = model.to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.0)
 
-        dataset = TensorDataset(X_train, Y_train)
+        dataset = TensorDataset(X_treino, Y_treino)
         train_size = int(0.85 * len(dataset))
         val_size = len(dataset) - train_size
-
         train_dataset, val_dataset = random_split(
-            dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(seed),
+            dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed)
         )
-
         train_loader = DataLoader(
             train_dataset,
             batch_size=64,
@@ -263,23 +282,13 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             shuffle=False,
         )
         test_loader = DataLoader(
-            TensorDataset(X_test, Y_test),
+            TensorDataset(X_teste, Y_teste),
             batch_size=10,
             shuffle=False,
         )
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0009, weight_decay=6.8e-04)
-        # optimizer = optim.Adam(model.parameters(), lr=0.0001)
-
-        # Initialize early stopping
-        early_stopping = EarlyStopping(
-            monitor='val_accuracy',
-            patience=500,
-            verbose=True,
-            delta=0.0001
-        )
 
         # Train
+        print(f"Training for {epochs} epochs...")
         best_model = train(
             model,
             train_loader,
@@ -295,8 +304,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
         # Evaluate
         accuracy, recall, f1, cm = evaluate(best_model, test_loader)
 
-        # Store metrics
-        metrics.append(
+        metricas_usuarios.append(
             {
                 "usuario": test_user,
                 "acuracia": accuracy,
@@ -305,14 +313,13 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
                 # "confusion_matrix": cm,
             }
         )
-
         print(
             f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
 
         # Save metrics (append to support restarting failed runs)
         metrics_path = exp_dir.joinpath("metricas.csv")
-        pd.DataFrame([metrics[-1]]).to_csv(
+        pd.DataFrame([metricas_usuarios[-1]]).to_csv(
             metrics_path,
             mode="a",
             header=not metrics_path.exists(),
@@ -321,6 +328,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
 
         print("-" * 50)
 
-    print(f"Experiment completed for window size {tamanho_da_janela_seg_val} s.")
+    print(f"Experiment completed for window size {tamanho_da_janela_seg} s.")
 
-print("\nAll experiments completed!")
+print("\n" + "="*100)
+print("All experiments completed!")

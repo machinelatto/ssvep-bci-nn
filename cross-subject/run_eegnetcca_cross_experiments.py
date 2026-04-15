@@ -12,6 +12,7 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import copy
+import gc
 from braindecode.models import EEGNet
 
 from cross_subject_utils import (
@@ -19,7 +20,7 @@ from cross_subject_utils import (
     EarlyStopping,
     load_data_from_users,
 )
-from benchmark_dataset import build_tensors_with_cca, load_freq_phase
+from benchmark_dataset import build_tensors_with_cca, load_freq_phase, build_tensors_with_cca_joint
 
 
 def train(
@@ -97,7 +98,7 @@ def train(
 
         # Early stopping check (if provided)
         if early_stopping is not None:
-            if early_stopping(model, val_loss, epoch):
+            if early_stopping(model, val_accuracy, epoch):
                 print(f"Early stopping triggered at epoch {epoch + 1}")
                 break
         else:
@@ -141,7 +142,8 @@ inform_fase = 0
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
-frequencias_desejadas = frequencias[:8]  # 8 frequencies
+users_to_run = list(range(6, 36))  # Ex.: [1, 5, 10]
+frequencias_desejadas = frequencias[:]  # 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -150,6 +152,7 @@ car_reference_channels = occipital_electrodes
 car_target_channels = occipital_electrodes
 
 print("Users of interest:", users)
+print("Users to run:", users_to_run)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
 
@@ -183,13 +186,13 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"35_8_optimized/CCA_EEGNET_8_2_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"35_40_optimized/CCA_ALL_EEGNET_8_2/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     metricas_usuarios = []
     # Leave-one-user-out cross-validation
-    for test_user_idx, test_user in enumerate(users):
+    for test_user in users_to_run:
         print(f"\nProcessing User {test_user}")
         train_users = [u for u in users if u != test_user]
         print(f"Train Users: {train_users}")
@@ -198,10 +201,10 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         train_data = np.concatenate(
             [all_data[users.index(u)] for u in train_users], axis=-1
         )  # shape: (channels, samples, freqs, trials)
-        test_data = all_data[test_user_idx]
+        test_data = all_data[users.index(test_user)]
 
         tensor_treinamento, tensor_teste, labels_train, labels_test, channels_for_model = (
-            build_tensors_with_cca(
+            build_tensors_with_cca_joint(
                 train_data,
                 test_data,
                 occipital_electrodes,
@@ -211,7 +214,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 num_harmonica,
                 inform_fase,
                 tamanho_da_janela,
-                mean_center=False,
+                mean_center=True,
                 apply_subband_filter=False,
             )
         )
@@ -235,7 +238,6 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
         Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long).to(device)
         Y_teste = torch.tensor(rotulos_teste, dtype=torch.long).to(device)
-
         print(f"X_train: {X_treino.shape}")
         print(f"X_test: {X_teste.shape}")
         print(f"Y_train: {Y_treino.shape}")
@@ -249,7 +251,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             kernel_length=(sample_rate // 2),
             F1=8,
             D=2,
-            drop_prob=0.3
+            drop_prob=0.25
         )
 
         model = model.to(device)
@@ -259,7 +261,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         # Initialize early stopping
         early_stopping = EarlyStopping(
-            monitor='val_loss',
+            monitor='val_accuracy',
             patience=500,
             verbose=False,
             delta=0.0001
@@ -271,10 +273,20 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         train_dataset, val_dataset = random_split(
             dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed)
         )
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=32,
+            shuffle=True,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=16,
+            shuffle=False,
+        )
         test_loader = DataLoader(
-            TensorDataset(X_teste, Y_teste), batch_size=10, shuffle=False
+            TensorDataset(X_teste, Y_teste),
+            batch_size=10,
+            shuffle=False,
         )
 
         # Train
@@ -307,9 +319,38 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
 
-        # Save metrics
-        df_metricas = pd.DataFrame(metricas_usuarios)
-        df_metricas.to_csv(exp_dir.joinpath("metricas.csv"), index=False)
+        # Free large per-user allocations before moving to the next LOO fold.
+        del (
+            train_data,
+            test_data,
+            tensor_treinamento,
+            tensor_teste,
+            X_treino,
+            X_teste,
+            Y_treino,
+            Y_teste,
+            dataset,
+            train_dataset,
+            val_dataset,
+            train_loader,
+            val_loader,
+            test_loader,
+            model,
+            best_model,
+            optimizer,
+        )
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Save metrics (append to support restarting failed runs)
+        metrics_path = exp_dir.joinpath("metricas.csv")
+        pd.DataFrame([metricas_usuarios[-1]]).to_csv(
+            metrics_path,
+            mode="a",
+            header=not metrics_path.exists(),
+            index=False,
+        )
 
         print("-" * 50)
 

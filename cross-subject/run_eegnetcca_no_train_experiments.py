@@ -135,6 +135,7 @@ inform_fase = 0
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 10 users for cross-subject
+users_to_run = users.copy()  # Ex.: [1, 5, 10]
 frequencias_desejadas = frequencias[:]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
@@ -144,6 +145,7 @@ car_reference_channels = occipital_electrodes
 car_target_channels = None
 
 print("Users of interest:", users)
+print("Users to run:", users_to_run)
 print("Frequencies of interest:", frequencias_desejadas)
 print("Indices of frequencies of interest:", indices)
 
@@ -184,7 +186,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     metricas_usuarios = []
 
     # Leave-one-user-out cross-validation
-    for test_user_idx, test_user in enumerate(users):
+    for test_user in users_to_run:
         # if test_user != 2 and tamanho_da_janela_seg == 0.4:
         #     continue
         print(f"\nProcessing User {test_user}")
@@ -195,7 +197,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         train_data = np.concatenate(
             [all_data[users.index(u)] for u in train_users], axis=-1
         )  # shape: (channels, samples, freqs, trials)
-        test_data = all_data[test_user_idx]
+        test_data = all_data[users.index(test_user)]
 
         num_canais, _, num_freqs, num_trials_train = train_data.shape
         num_trials_test = test_data.shape[-1]
@@ -263,7 +265,6 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
         Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long).to(device)
         Y_teste = torch.tensor(rotulos_teste, dtype=torch.long).to(device)
-
         print(f"X_train: {X_treino.shape}")
         print(f"X_test: {X_teste.shape}")
         print(f"Y_train: {Y_treino.shape}")
@@ -287,10 +288,20 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         train_dataset, val_dataset = random_split(
             dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed)
         )
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=64,
+            shuffle=True,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=16,
+            shuffle=False,
+        )
         test_loader = DataLoader(
-            TensorDataset(X_teste, Y_teste), batch_size=10, shuffle=False
+            TensorDataset(X_teste, Y_teste),
+            batch_size=10,
+            shuffle=False,
         )
 
         # # Train
@@ -323,9 +334,14 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
 
-        # Save metrics
-        df_metricas = pd.DataFrame(metricas_usuarios)
-        df_metricas.to_csv(exp_dir.joinpath("metricas.csv"), index=False)
+        # Save metrics (append to support restarting failed runs)
+        metrics_path = exp_dir.joinpath("metricas.csv")
+        pd.DataFrame([metricas_usuarios[-1]]).to_csv(
+            metrics_path,
+            mode="a",
+            header=not metrics_path.exists(),
+            index=False,
+        )
 
         print("-" * 50)
 
