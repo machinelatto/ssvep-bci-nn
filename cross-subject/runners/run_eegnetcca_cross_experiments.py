@@ -142,7 +142,7 @@ inform_fase = 0
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
-users_to_run = list(range(6, 36))  # Ex.: [1, 5, 10]
+users_to_run = users.copy()  # Ex.: [1, 5, 10]
 frequencias_desejadas = frequencias[:]  # 40 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 

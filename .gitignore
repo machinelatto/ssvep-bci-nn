@@ -191,3 +191,5 @@ cython_debug/
 settings.json
 
 cross-subject/pre-*
+
+.github
