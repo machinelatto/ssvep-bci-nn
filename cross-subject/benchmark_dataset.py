@@ -16,6 +16,7 @@ from ssvep_shared import (
     filter_signals_subbands,
     split_trials_into_windows,
 )
+from cross_subject_utils import car_filter
 
 
 def load_data_from_users(
@@ -23,6 +24,9 @@ def load_data_from_users(
     visual_delay=160,
     dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     filter_bandpass=False,
+    apply_car=False,
+    car_reference_channels=None,
+    car_target_channels=None,
     sample_rate=250,
     freq_cut_low=6,
     freq_cut_high=70,
@@ -35,7 +39,8 @@ def load_data_from_users(
     """Load benchmark users from .mat files and slice post-stimulus interval.
 
     The baseline excerpt is always selected as [visual_delay : visual_delay + 1250].
-    Optionally, each trial can then be split into windows.
+    Optionally, each trial can then be CAR-referenced, split into windows,
+    and normalized.
     """
     all_data = []
     for user in tqdm(users, desc="Carregando dados dos usuarios"):
@@ -48,6 +53,20 @@ def load_data_from_users(
 
         # Keep the benchmark-compatible excerpt used by existing experiments.
         data = data[:, visual_delay : (visual_delay + 1250), :, :]
+
+        if apply_car:
+
+            data_car = data.copy()
+            _, _, num_freqs, num_trials = data_car.shape
+
+            for freq_idx in range(num_freqs):
+                for trial_idx in range(num_trials):
+                    data_car[:, :, freq_idx, trial_idx] = car_filter(
+                        data_car[:, :, freq_idx, trial_idx],
+                        reference_channels=car_reference_channels,
+                        target_channels=car_target_channels,
+                    )
+            data = data_car
 
         if window_size is not None:
             data = split_trials_into_windows(

@@ -55,7 +55,7 @@ DEFAULT_CHANNEL_NAMES = [
     "FCz",
 ]
 
-# Local CAR neighborhoods inspired by Teste14BCI_CAR_sarah.m.
+# Local CAR neighborhoods inspired by Teste14BCI_CAR_example.m.
 # Each entry is: central channel -> neighborhood channels used in the average.
 LOCAL_CAR_GROUPS = {
     "O1": ["O1", "PO7", "PO3", "POz", "Oz"],

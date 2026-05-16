@@ -13,11 +13,6 @@ from tqdm import tqdm
 import copy
 # import tqdm.notebook
 
-from benchmark_dataset import (
-    bandpass_filter as _bandpass_filter,
-    filter_signals_subbands as _filter_signals_subbands,
-    load_data_from_users as _load_data_from_users,
-)
 
 
 class EarlyStopping:
@@ -147,11 +142,6 @@ def plot_learning_curves(train_losses, val_losses, train_accuracies, val_accurac
     plt.show()
 
 
-def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
-    """Compatibility wrapper for benchmark_dataset.filter_signals_subbands."""
-    return _filter_signals_subbands(eeg_signals, subban_no, sampling_rate)
-
-
 def get_windows(eeg_matrix, window_size, include_last=False):
     """Extract sliding windows from the EEG matrix.
 
@@ -227,19 +217,6 @@ def evaluate(model, test_loader):
     return accuracy, recall, f1, cm
 
 
-def bandpass_filter(
-    dados, taxa_amostragem, freq_corte_low, freq_corte_high, ordem_filtro
-):
-    """Compatibility wrapper for benchmark_dataset.bandpass_filter."""
-    return _bandpass_filter(
-        dados,
-        taxa_amostragem,
-        freq_corte_low,
-        freq_corte_high,
-        ordem_filtro,
-    )
-
-
 def car_filter(eeg_matrix, reference_channels=None, target_channels=None):
     """Apply CAR to a 2D EEG matrix with shape (channels, samples).
 
@@ -276,57 +253,3 @@ def car_filter(eeg_matrix, reference_channels=None, target_channels=None):
     out = eeg_matrix.copy()
     out[target_channels, :] = eeg_matrix[target_channels, :] - reference[np.newaxis, :]
     return out
-
-
-def load_data_from_users(
-    users,
-    visual_delay=160,
-    dataset_path="C:/Users/machi/Documents/Mestrado/repos/data/benchmark/",
-    filter_bandpass=False,
-    apply_car=False,
-    car_reference_channels=None,
-    car_target_channels=None,
-    sample_rate=250,
-    freq_cut_low=6,
-    freq_cut_high=70,
-    filter_order=10,
-):
-    """Compatibility wrapper for benchmark_dataset.load_data_from_users.
-
-    Optional preprocessing order:
-    1) Bandpass (if filter_bandpass=True)
-    2) CAR per (frequency, trial) slice (if apply_car=True)
-    """
-    data = _load_data_from_users(
-        users=users,
-        visual_delay=visual_delay,
-        dataset_path=dataset_path,
-        filter_bandpass=filter_bandpass,
-        sample_rate=sample_rate,
-        freq_cut_low=freq_cut_low,
-        freq_cut_high=freq_cut_high,
-        filter_order=filter_order,
-        
-    )
-
-    if not apply_car:
-        return data
-
-    data_car = []
-    for user_data in data:
-        user_data_car = user_data.copy()
-        _, _, num_freqs, num_trials = user_data_car.shape
-
-        for freq_idx in range(num_freqs):
-            for trial_idx in range(num_trials):
-                user_data_car[:, :, freq_idx, trial_idx] = car_filter(
-                    user_data_car[:, :, freq_idx, trial_idx],
-                    reference_channels=car_reference_channels,
-                    target_channels=car_target_channels,
-                )
-
-        data_car.append(user_data_car)
-
-    return data_car
-
-

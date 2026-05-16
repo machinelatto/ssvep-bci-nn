@@ -15,12 +15,21 @@ from tqdm import tqdm
 import copy
 from braindecode.models import EEGNet
 
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from benchmark_dataset import (
+    load_data_from_users,
+    load_freq_phase,
+    build_tensors_no_cca,
+)
+
 from cross_subject_utils import (
     evaluate,
     EarlyStopping,
-    load_data_from_users,
 )
-from benchmark_dataset import build_tensors_no_cca, load_freq_phase
 
 
 def train(
@@ -111,7 +120,7 @@ def train(
         # torch.save(model.state_dict(), save_path)
     else:
         model.load_state_dict(torch.load(save_path))
-    
+
     return model
 
 
@@ -127,16 +136,16 @@ frequencias, _ = load_freq_phase()
 
 # Preprocessing parameters
 filter_order = 10
-freq_cut_high = 50
+freq_cut_high = 90
 freq_cut_low = 6
 sample_rate = 250
 delay = 160
 
 # Electrodes and frequencies of interest
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 36))  # 35 users (full dataset)
+users = list(range(1, 11))  # 35 users (full dataset)
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
-frequencias_desejadas = frequencias[:]  # First 8 frequencies
+frequencias_desejadas = frequencias[:8]  # First 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -163,22 +172,23 @@ all_data = load_data_from_users(
     freq_cut_low=freq_cut_low,
     freq_cut_high=freq_cut_high,
     filter_order=filter_order,
+    normalize=True,
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg = [1.0]
+tamanho_da_janela_seg_list = [0.4, 0.6, 0.8, 1.0]
 
 # Training parameters
 epochs = 1000
 
-for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
+for tamanho_da_janela_seg_val in tamanho_da_janela_seg_list:
     tamanho_da_janela = int(np.ceil(tamanho_da_janela_seg_val * sample_rate))
     print(f"\n{'='*100}")
     print(f"Window size: {tamanho_da_janela} samples ({tamanho_da_janela_seg_val} s)")
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"35_40_optimized/EEGNET_8_2_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
+        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/models/EEGNET_8_2_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg_val}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -268,7 +278,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             shuffle=False,
         )
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0009, weight_decay=6.8e-04)
+        optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
         # optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
         # Initialize early stopping
