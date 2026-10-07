@@ -1,12 +1,19 @@
+import sys
+
 import pandas as pd
 from pathlib import Path
 import numpy as np
 import scipy
 
+PROJECT_ROOT = Path("/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject")
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from cross_subject_utils import (
     evaluate,
-    load_data_from_users,
 )
+
+from benchmark_dataset import load_data_from_users, load_freq_phase
 
 from sklearn.metrics import (
     confusion_matrix,
@@ -38,32 +45,34 @@ def evaluate(all_labels, all_preds):
 freq_phase_path = (
     "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
 )
-freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase(freq_phase_path)
 
 # Parâmetros do pré-processamento
 sample_rate = 250
 filter_order = 10
-freq_cut_high = 50
+freq_cut_high = 80
 freq_cut_low = 6
 delay = 160
 
 # Parâmetros do CCA
-num_harmonica = 3
+num_harmonica = 5
 inform_fase = 0
 
 # Usuários
 users = list(range(1, 36))  # Usuários de 1 a 35
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-frequencias_desejadas = frequencias[:] # Todas as frequências
+frequencias_desejadas = frequencias[:8] # Todas as frequências
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
 apply_car = True
 car_reference_channels = occipital_electrodes
 car_target_channels = occipital_electrodes
+
+# Optional padronization configuration on loaded data
+apply_padronization = True
 
 print("Usuários de interesse:", users)
 print("Usuários para executar:", users_to_run)
@@ -92,7 +101,7 @@ for tamanho in tamanho_da_janela_seg:
     print(f"Tamanho da janela: {tamanho_da_janela} samples ({tamanho} s)")
 
     exp_dir = Path(
-        f"35_40_optimized/CCA_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
+        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/thesis/CCA_vs_SVM/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho}_s/"
     )
 
     # Cross-Subject EEGNet Training (single window per trial, no window separation)
@@ -126,6 +135,13 @@ for tamanho in tamanho_da_janela_seg:
                 eeg_matrix_test = test_data[
                     occipital_electrodes, :tamanho_da_janela, indices[k], session
                 ]
+                if apply_padronization:
+                    # Padronização por canal (z-score)
+                    channel_mean = np.mean(eeg_matrix_test, axis=1, keepdims=True)
+                    channel_std = np.maximum(
+                        np.std(eeg_matrix_test, axis=1, keepdims=True), 1e-8
+                    )
+                    eeg_matrix_test = (eeg_matrix_test - channel_mean) / channel_std
                 # NO TRANSPOSE - keep standard BCI format: (num_channels, num_timepoints)
                 labels.append(indices[k])
                 corrs = np.zeros(len(indices))

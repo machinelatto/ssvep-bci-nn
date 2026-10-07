@@ -79,7 +79,7 @@ def load_data_from_users(
         if normalize:
             mean = np.mean(data, axis=1, keepdims=True)
             std = np.std(data, axis=1, keepdims=True)
-            std[std == 0] = 1.0  # Prevent division by zero
+            std = np.maximum(std, 1e-8)  # Prevent division by zero
             data = (data - mean) / std
 
         all_data.append(data)

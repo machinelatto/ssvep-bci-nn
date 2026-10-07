@@ -3,6 +3,8 @@ Run EEGNet+CCA cross-subject experiments with all time windows.
 Uses CCA optimization and projections similar to the notebook approach.
 """
 
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -42,11 +44,13 @@ def train(
     device=0,
     save_path="best_model.pth",
     early_stopping=None,
+    use_amp=False,
 ):
     """Train the model with optional early stopping based on validation metrics."""
     model.to(device)
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
+    scaler = torch.amp.GradScaler(enabled=use_amp)
 
     for epoch in tqdm(range(num_epochs)):
         # Training Phase
@@ -56,12 +60,15 @@ def train(
         train_total = 0
 
         for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item()
 
             # eval train
@@ -79,9 +86,11 @@ def train(
         val_total = 0
         with torch.inference_mode():
             for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                inputs = inputs.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+                with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
                 val_loss += loss.item()
 
                 # val accuracy
@@ -127,6 +136,7 @@ def train(
 
 # Configuration
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+use_amp = False
 seed = 42
 torch.cuda.manual_seed(seed)
 torch.manual_seed(seed)
@@ -140,19 +150,21 @@ frequencias, fases = load_freq_phase()
 # Preprocessing parameters
 sample_rate = 250
 filter_order = 10
-freq_cut_high = 90
+freq_cut_high = 80
 freq_cut_low = 6
 delay = 160
 
 # CCA parameters
 num_harmonica = 5
 inform_fase = 0
+cca_reg = 0
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 11))  # 35 users for cross-subject
+users = list(range(1, 36))  # 35 users for cross-subject
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
-frequencias_desejadas = frequencias[:8]  # 40 frequencies
+frequencias_desejadas = frequencias[:]  # All frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -182,8 +194,16 @@ all_data = load_data_from_users(
     normalize=True,
 )
 
+# Keep only the channels used by the model and detach them as float32 arrays.
+# CAR has already been applied using the original channel indices above.
+all_data = [
+    np.asarray(data[occipital_electrodes, :, :, :], dtype=np.float32)
+    for data in all_data
+]
+model_electrodes = np.arange(len(occipital_electrodes))
+
 # Time window sizes in seconds
-tamanho_da_janela_seg_list = [0.4, 0.6, 0.8, 1.0]
+tamanho_da_janela_seg_list = [0.6, 0.4]  # in seconds
 
 # Training parameters
 epochs = 1000
@@ -196,7 +216,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/models/CCA_ALL_EEGNET_8_2/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/thesis/cca_eegnet_4_2/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -212,12 +232,12 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             [all_data[users.index(u)] for u in train_users], axis=-1
         )  # shape: (channels, samples, freqs, trials)
         test_data = all_data[users.index(test_user)]
-
+        print("Building tensors with CCA...")
         tensor_treinamento, tensor_teste, labels_train, labels_test, channels_for_model = (
             build_tensors_with_cca(
                 train_data,
                 test_data,
-                occipital_electrodes,
+                model_electrodes,
                 frequencias,
                 fases,
                 indices,
@@ -226,8 +246,10 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 tamanho_da_janela,
                 mean_center=True,
                 apply_subband_filter=False,
+                cca_reg=cca_reg,
             )
         )
+        del train_data, test_data
 
         # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
@@ -244,10 +266,12 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             ]
         )
 
-        X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32).to(device)
-        X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
-        Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long).to(device)
-        Y_teste = torch.tensor(rotulos_teste, dtype=torch.long).to(device)
+        X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32)
+        X_teste = torch.tensor(tensor_teste, dtype=torch.float32)
+        Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long)
+        Y_teste = torch.tensor(rotulos_teste, dtype=torch.long)
+        del tensor_treinamento, tensor_teste, labels_train, labels_test
+        del rotulos_treinamento, rotulos_teste
         print(f"X_train: {X_treino.shape}")
         print(f"X_test: {X_teste.shape}")
         print(f"Y_train: {Y_treino.shape}")
@@ -259,30 +283,31 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             n_outputs=len(frequencias_desejadas),
             n_times=tamanho_da_janela,
             kernel_length=(sample_rate // 2),
-            F1=8,
+            F1=4,
             D=2,
             drop_prob=0.25
         )
 
         model = model.to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.01)
+        optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
         # optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
         # Initialize early stopping
         early_stopping = EarlyStopping(
             monitor='val_accuracy',
-            patience=500,
+            patience=250,
             verbose=False,
             delta=0.0001
         )
 
         dataset = TensorDataset(X_treino, Y_treino)
-        train_size = int(0.85 * len(dataset))
+        train_size = int(0.9 * len(dataset))
         val_size = len(dataset) - train_size
         train_dataset, val_dataset = random_split(
             dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed)
         )
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=64,
@@ -311,6 +336,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             device=device,
             save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
             early_stopping=early_stopping,
+            use_amp=use_amp,
         )
 
         # Evaluate
@@ -331,10 +357,6 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
 
         # Free large per-user allocations before moving to the next LOO fold.
         del (
-            train_data,
-            test_data,
-            tensor_treinamento,
-            tensor_teste,
             X_treino,
             X_teste,
             Y_treino,

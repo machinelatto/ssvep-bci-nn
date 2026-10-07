@@ -119,7 +119,7 @@ frequencias, fases = load_freq_phase()
 
 # Preprocessing parameters
 filter_order = 10
-freq_cut_high = 50
+freq_cut_high = 80
 freq_cut_low = 6
 sample_rate = 250
 delay = 160

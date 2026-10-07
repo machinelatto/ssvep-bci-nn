@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def CCA(X: np.ndarray, Y: np.ndarray):
+def CCA(X: np.ndarray, Y: np.ndarray, reg=1e-6):
     """Canonical Correlation Analysis for SSVEP BCI
 
     Standard format for EEG/BCI applications:
@@ -11,6 +11,7 @@ def CCA(X: np.ndarray, Y: np.ndarray):
     Args:
         X (np.ndarray): EEG signal matrix, shape (num_channels, num_timepoints)
         Y (np.ndarray): Reference signal matrix, shape (num_features, num_timepoints)
+        reg (float): Diagonal regularization for Cxx/Cyy (set to 0 to disable)
 
     Returns:
         Wx (np.ndarray): Spatial filter for X (num_channels,)
@@ -39,9 +40,9 @@ def CCA(X: np.ndarray, Y: np.ndarray):
     )
 
     # Autocovariância de X
-    Cxx = S[:colunas_X, :colunas_X] + 1e-6 * np.eye(colunas_X)
+    Cxx = S[:colunas_X, :colunas_X] + reg * np.eye(colunas_X)
     # Autocovariância de Y
-    Cyy = S[colunas_X:, colunas_X:] + 1e-6 * np.eye(S.shape[0] - colunas_X)
+    Cyy = S[colunas_X:, colunas_X:] + reg * np.eye(S.shape[0] - colunas_X)
     # Covariância entre X e Y
     Cxy = S[:colunas_X, colunas_X:]
 

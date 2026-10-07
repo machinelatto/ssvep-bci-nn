@@ -3,6 +3,8 @@ Run DNN cross-subject experiments with all time windows.
 Uses subband filtering with no CCA optimization.
 """
 
+import gc
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,12 +15,17 @@ from pathlib import Path
 from tqdm import tqdm
 import copy
 
+
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from cross_subject_utils import (
     evaluate,
     EarlyStopping,
-    load_data_from_users,
 )
-from benchmark_dataset import build_tensors_no_cca, load_freq_phase
+from benchmark_dataset import build_tensors_no_cca, load_data_from_users, load_freq_phase
 from dnn import SSVEPDNN
 
 
@@ -125,13 +132,17 @@ np.random.seed(seed)
 print(f"Using device: {device}")
 
 # Load frequency and phase information
-frequencias, _ = load_freq_phase()
+frequencias, _ = load_freq_phase("/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat")
 
 # Preprocessing parameters
 sample_rate = 250
 delay = 160
+freq_cut_low = 6
+freq_cut_high = 80
+filter_order = 10
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
@@ -154,15 +165,26 @@ all_data = load_data_from_users(
     users=users,
     dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     visual_delay=delay,
-    filter_bandpass=False,
+    filter_bandpass=True,
     apply_car=apply_car,
     car_reference_channels=car_reference_channels,
     car_target_channels=car_target_channels,
     sample_rate=sample_rate,
+    freq_cut_low=freq_cut_low,
+    freq_cut_high=freq_cut_high,
+    filter_order=filter_order,
 )
 
+# Keep only the channels used by the model and detach them as float32 arrays.
+# CAR has already been applied using the original channel indices above.
+all_data = [
+    np.asarray(data[occipital_electrodes, :, :, :], dtype=np.float32)
+    for data in all_data
+]
+model_electrodes = np.arange(len(occipital_electrodes))
+
 # Time window sizes in seconds
-tamanho_da_janela_seg_list = [1.0]
+tamanho_da_janela_seg_list = [1.0, 0.8, 0.6, 0.4]  # in seconds
 
 # Training parameters
 epochs = 1000
@@ -175,7 +197,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"35_8_optimized/DNN_CAR/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/thesis/dnn/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -195,7 +217,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             build_tensors_no_cca(
                 train_data,
                 test_data,
-                occipital_electrodes,
+                model_electrodes,
                 frequencias,
                 indices,
                 tamanho_da_janela,
@@ -204,6 +226,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 sampling_rate=sample_rate,
             )
         )
+        del train_data, test_data
 
         # Label mapping
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
@@ -220,10 +243,11 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             ]
         )
 
-        X_train = torch.from_numpy(x_train.copy()).float().to(device)
-        X_test = torch.from_numpy(x_test.copy()).float().to(device)
-        Y_train = labels_train.to(torch.long).to(device)
-        Y_test = labels_test.to(torch.long).to(device)
+        X_train = torch.from_numpy(x_train.copy()).float()
+        X_test = torch.from_numpy(x_test.copy()).float()
+        Y_train = labels_train.to(torch.long)
+        Y_test = labels_test.to(torch.long)
+        del x_train, x_test, labels_train, labels_test
         print(f"X_train: {X_train.shape}")
         print(f"X_test: {X_test.shape}")
         print(f"Y_train: {Y_train.shape}")
@@ -241,7 +265,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         ).to(device)
 
         dataset = TensorDataset(X_train, Y_train)
-        train_size = int(0.85 * len(dataset))
+        train_size = int(0.9 * len(dataset))
         val_size = len(dataset) - train_size
         train_dataset, val_dataset = random_split(
             dataset,
@@ -266,12 +290,13 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         )
 
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0004, weight_decay=0.0005)
+        # optimizer = optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.0005)
+        optimizer = optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.0005)
 
         # Initialize early stopping
         early_stopping = EarlyStopping(
             monitor='val_accuracy',
-            patience=500,
+            patience=250,
             verbose=False,
             delta=0.0001
         )
@@ -305,6 +330,25 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         print(
             f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
+
+        del (
+            dataset,
+            train_dataset,
+            val_dataset,
+            train_loader,
+            val_loader,
+            test_loader,
+            X_train,
+            X_test,
+            Y_train,
+            Y_test,
+            model,
+            best_model,
+            optimizer,
+        )
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Save metrics (append to support restarting failed runs)
         metrics_path = exp_dir.joinpath("metricas.csv")

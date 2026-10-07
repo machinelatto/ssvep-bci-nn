@@ -47,8 +47,9 @@ def filter_signals_subbands(eeg_signals, subban_no, sampling_rate):
         dtype=eeg_signals.dtype,
     )
 
-    high_cutoff = [50] * subban_no
+    high_cutoff = [80] * subban_no
     low_cutoff = [i for i in range(8, 8 * (subban_no + 1), 8)]
+    low_cutoff[0] = 6  # Adjust the first subband to start at 6 Hz
     filter_order = 2
     passband_ripple = 1
     bp_filters = []
@@ -166,6 +167,7 @@ def build_tensors_with_cca(
     apply_subband_filter=True,
     subban_no=3,
     sampling_rate=250,
+    cca_reg=1e-6,
 ):
     """Build CCA-projected train/test tensors and labels."""
     num_trials_train = train_data.shape[-1]
@@ -220,7 +222,7 @@ def build_tensors_with_cca(
             fases,
             tamanho_da_janela,
         )
-        wx, _, _ = CCA(x_train_cca[:, :, k], y_ref)
+        wx, _, _ = CCA(x_train_cca[:, :, k], y_ref, reg=cca_reg)
         combinadores_x.append(wx)
     combinadores_x = np.column_stack(combinadores_x)
 

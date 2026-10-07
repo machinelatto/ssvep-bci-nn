@@ -18,8 +18,8 @@ from braindecode.models import EEGNet
 from cross_subject_utils import (
     plot_learning_curves,
     evaluate,
-    load_data_from_users,
 )
+from benchmark_dataset import load_data_from_users, load_freq_phase
 from cca import CCA, reference_matrix
 
 
@@ -118,13 +118,12 @@ print(f"Using device: {device}")
 # Load frequency and phase information
 freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
 freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase(freq_phase_path)
 
 # Preprocessing parameters
 sample_rate = 250
 filter_order = 10
-freq_cut_high = 70
+freq_cut_high = 80
 freq_cut_low = 6
 delay = 160
 
@@ -133,14 +132,15 @@ num_harmonica = 5
 inform_fase = 0
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 10 users for cross-subject
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
-frequencias_desejadas = frequencias[:]  # 8 frequencies
+frequencias_desejadas = frequencias[:8]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
-apply_car = False
+apply_car = True
 car_reference_channels = occipital_electrodes
 car_target_channels = None
 

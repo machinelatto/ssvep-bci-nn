@@ -133,16 +133,17 @@ frequencias, _ = load_freq_phase()
 
 # Preprocessing parameters
 filter_order = 10
-freq_cut_high = 50
+freq_cut_high = 80
 freq_cut_low = 6
 sample_rate = 250
 delay = 160
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 11))  # 35 users (full dataset)
+users = list(range(1, 36))  # 35 users (full dataset)
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
-frequencias_desejadas = frequencias[:8]  # First 8 frequencies
+frequencias_desejadas = frequencias[:]  # First 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -172,7 +173,7 @@ all_data = load_data_from_users(
 )
 
 # Time window sizes in seconds
-tamanho_da_janela_seg = [1.0]
+tamanho_da_janela_seg = [0.4,0.6,0.8,1.0]
 
 # Training parameters
 epochs = 1000
@@ -184,7 +185,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/models/eegnet_10"
+        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/thesis/eegnet_8_2"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -253,7 +254,7 @@ for tamanho_da_janela_seg_val in tamanho_da_janela_seg:
             n_outputs=len(frequencias_desejadas),
             n_times=tamanho_da_janela,
             kernel_length=(sample_rate // 2),
-            F1=8,
+            F1=4,
             D=2,
             drop_prob=0.25,
         )

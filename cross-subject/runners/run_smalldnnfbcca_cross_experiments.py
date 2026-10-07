@@ -130,8 +130,7 @@ print(f"Using device: {device}")
 # Load frequency and phase information
 freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
 freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase(freq_phase_path)
 
 # Preprocessing parameters
 sample_rate = 250
@@ -142,10 +141,11 @@ num_harmonica = 3
 inform_fase = 0
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
-frequencias_desejadas = frequencias[:]  # 8 frequencies
+frequencias_desejadas = frequencias[:8]  # 8 frequencies
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 
 # Optional CAR configuration on loaded data
@@ -164,11 +164,14 @@ all_data = load_data_from_users(
     dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     users=users,
     visual_delay=delay,
-    filter_bandpass=False,
+    filter_bandpass=True,
     apply_car=apply_car,
     car_reference_channels=car_reference_channels,
     car_target_channels=car_target_channels,
     sample_rate=sample_rate,
+    freq_cut_low=6,
+    freq_cut_high=80,
+    filter_order=10,
 )
 
 # Time window sizes in seconds

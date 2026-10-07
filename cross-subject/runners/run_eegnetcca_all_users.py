@@ -123,7 +123,7 @@ frequencias, fases = load_freq_phase()
 
 # Preprocessing parameters
 filter_order = 10
-freq_cut_high = 50
+freq_cut_high = 80
 freq_cut_low = 6
 sample_rate = 250
 delay = 160
@@ -133,8 +133,10 @@ num_harmonica = 3
 inform_fase = 0
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
-users = list(range(1, 11))
+users = list(range(1, 36))
+users_to_run = users.copy()
 frequencias_desejadas = frequencias[:8]
 indices = [np.where(frequencias == freq)[0][0] for freq in frequencias_desejadas]
 

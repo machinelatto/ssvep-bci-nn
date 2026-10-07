@@ -3,6 +3,8 @@ Run DNN+CCA cross-subject experiments with all time windows.
 Uses CCA optimization per subband and subband-specific filtering.
 """
 
+import gc
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,12 +16,16 @@ from tqdm import tqdm
 import copy
 import scipy.io
 
+import sys
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from cross_subject_utils import (
     evaluate,
-    load_data_from_users,
     EarlyStopping,
 )
-from benchmark_dataset import build_tensors_with_fbcca
+from benchmark_dataset import build_tensors_with_fbcca, load_data_from_users, load_freq_phase
 from dnn import SSVEPDNN
 
 
@@ -33,12 +39,14 @@ def train(
     device=0,
     save_path="best_model.pth",
     early_stopping=None,
+    use_amp=False,
 ):
     """Train the model with optional early stopping based on validation metrics."""
     best_val_accuracy = -float("inf")
     model.to(device)
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
+    scaler = torch.amp.GradScaler(enabled=use_amp)
     
     for epoch in tqdm(range(num_epochs)):
         # Training Phase
@@ -48,12 +56,13 @@ def train(
         train_total = 0
 
         for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             running_loss += loss.item()
 
             # eval train
@@ -71,9 +80,9 @@ def train(
         val_total = 0
         with torch.inference_mode():
             for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
+                with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
                 val_loss += loss.item()
 
                 # val accuracy
@@ -121,6 +130,7 @@ def train(
 
 # Configuration
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+use_amp = torch.cuda.is_available()
 seed = 42
 torch.cuda.manual_seed(seed)
 torch.manual_seed(seed)
@@ -131,18 +141,18 @@ print(f"Using device: {device}")
 # Load frequency and phase information
 freq_phase_path = "/home/mateuschinelatto/Experiments/data/benchmark/Freq_Phase.mat"
 freq_phase = scipy.io.loadmat(freq_phase_path)
-frequencias = np.round(freq_phase["freqs"], 2).ravel()
-fases = freq_phase["phases"]
+frequencias, fases = load_freq_phase(freq_phase_path)
 
 # Preprocessing parameters
 sample_rate = 250
 delay = 160
 
 # CCA parameters
-num_harmonica = 3
+num_harmonica = 5
 inform_fase = 0
 
 # Electrodes and frequencies of interest
+all_occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 occipital_electrodes = np.array([47, 53, 54, 55, 56, 57, 60, 61, 62])
 users = list(range(1, 36))  # 35 users for cross-subject
 users_to_run = users.copy()  # Ex.: [1, 5, 10]
@@ -165,15 +175,27 @@ all_data = load_data_from_users(
     dataset_path="/home/mateuschinelatto/Experiments/data/benchmark/",
     users=users,
     visual_delay=delay,
-    filter_bandpass=False,
+    filter_bandpass=True,
     apply_car=apply_car,
     car_reference_channels=car_reference_channels,
     car_target_channels=car_target_channels,
     sample_rate=sample_rate,
+    freq_cut_low=6,
+    freq_cut_high=80,
+    filter_order=10,
+    normalize=True,
 )
 
+# Keep only the channels used by the model and detach them as float32 arrays.
+# CAR has already been applied using the original channel indices above.
+all_data = [
+    np.asarray(data[occipital_electrodes, :, :, :], dtype=np.float32)
+    for data in all_data
+]
+model_electrodes = np.arange(len(occipital_electrodes))
+
 # Time window sizes in seconds
-tamanho_da_janela_seg_list = [1.0]
+tamanho_da_janela_seg_list = [1.0, 0.8, 0.6, 0.4]
 
 # Training parameters
 epochs = 1000
@@ -186,7 +208,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
     print(f"{'='*100}")
 
     exp_dir = Path(
-        f"35_8_optimized/FBCCA_DNN/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
+        f"/home/mateuschinelatto/Experiments/ssvep-bci-nn/cross-subject/louo_experiments/thesis/fbcca_dnn/{len(users)}_users_{len(frequencias_desejadas)}_freqs_{tamanho_da_janela_seg}_s/"
     )
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -208,7 +230,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             build_tensors_with_fbcca(
                 train_data,
                 test_data,
-                occipital_electrodes,
+                model_electrodes,
                 frequencias,
                 fases,
                 indices,
@@ -220,6 +242,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
                 sampling_rate=sample_rate,
             )
         )
+        del train_data, test_data
 
         # Map labels to indices
         mapeamento = {rotulo: i for i, rotulo in enumerate(sorted(frequencias_desejadas))}
@@ -236,10 +259,12 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             ]
         )
 
-        X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32).to(device)
-        X_teste = torch.tensor(tensor_teste, dtype=torch.float32).to(device)
-        Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long).to(device)
-        Y_teste = torch.tensor(rotulos_teste, dtype=torch.long).to(device)
+        X_treino = torch.tensor(tensor_treinamento, dtype=torch.float32, device=device)
+        X_teste = torch.tensor(tensor_teste, dtype=torch.float32, device=device)
+        Y_treino = torch.tensor(rotulos_treinamento, dtype=torch.long, device=device)
+        Y_teste = torch.tensor(rotulos_teste, dtype=torch.long, device=device)
+        del tensor_treinamento, tensor_teste, labels_train, labels_test
+        del rotulos_treinamento, rotulos_teste
         print(f"X_train: {X_treino.shape}")
         print(f"X_test: {X_teste.shape}")
         print(f"Y_train: {Y_treino.shape}")
@@ -248,8 +273,8 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         # Initialize early stopping
         early_stopping = EarlyStopping(
             monitor='val_accuracy',
-            patience=500,
-            verbose=True,
+            patience=250,
+            verbose=False,
             delta=0.0001
         )
 
@@ -265,17 +290,17 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         )
         model = model.to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
+        optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.0001)
 
         dataset = TensorDataset(X_treino, Y_treino)
-        train_size = int(0.85 * len(dataset))
+        train_size = int(0.9 * len(dataset))
         val_size = len(dataset) - train_size
         train_dataset, val_dataset = random_split(
             dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed)
         )
         train_loader = DataLoader(
             train_dataset,
-            batch_size=64,
+            batch_size=256,
             shuffle=True,
         )
         val_loader = DataLoader(
@@ -285,7 +310,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         )
         test_loader = DataLoader(
             TensorDataset(X_teste, Y_teste),
-            batch_size=10,
+            batch_size=240,
             shuffle=False,
         )
 
@@ -301,6 +326,7 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
             device=device,
             save_path=exp_dir.joinpath(f"best_model_user_{test_user}.pth"),
             early_stopping=early_stopping,
+            use_amp=use_amp,
         )
 
         # Evaluate
@@ -318,6 +344,25 @@ for tamanho_da_janela_seg in tamanho_da_janela_seg_list:
         print(
             f"User {test_user} Finished: Accuracy={accuracy:.4f}, Recall={recall:.4f}, F1={f1:.4f}"
         )
+
+        del (
+            X_treino,
+            X_teste,
+            Y_treino,
+            Y_teste,
+            dataset,
+            train_dataset,
+            val_dataset,
+            train_loader,
+            val_loader,
+            test_loader,
+            model,
+            best_model,
+            optimizer,
+        )
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Save metrics (append to support restarting failed runs)
         metrics_path = exp_dir.joinpath("metricas.csv")
